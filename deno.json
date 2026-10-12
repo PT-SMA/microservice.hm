@@ -1,0 +1,30 @@
+{
+  "tasks": {
+    "start": "deno run --allow-net --allow-env --allow-read main.ts",
+    "dev": "deno run --watch -A main.ts"
+  },
+  "compilerOptions": {
+    "jsx": "precompile",
+    "jsxImportSource": "hono/jsx"
+  },
+  "imports": {
+    "@std/path": "jsr:@std/path@^1.1.4",
+    "hono": "jsr:@hono/hono@^4.12.7",
+    "redis": "npm:redis@^5.11.0",
+    "pg": "npm:pg@^8.22.0",
+    "sequelize": "npm:sequelize@^6.37.8",
+    "socket.io": "https://deno.land/x/socket_io@0.2.1/mod.ts",
+    "app": "./src/app.ts",
+    "routes": "./src/routes/index.ts",
+    "helpers": "./src/helpers/index.ts",
+    "handlers": "./src/handlers/index.ts",
+    "middlewares": "./src/middlewares/index.ts",
+    "modules": "./src/modules/index.ts",
+    "models": "./src/models/index.ts",
+    "utils": "./src/utils/index.ts",
+    "consts": "./src/constants/index.ts",
+    "types": "./src/@types/index.ts",
+    "errors": "./src/errors/index.ts",
+    "classes/bases": "./src/classes/bases/index.ts"
+  }
+}
