@@ -1,0 +1,9 @@
+.git
+.github
+.vscode
+.changeset
+node_modules
+.histfile
+.env
+.env.*
+!.env.example

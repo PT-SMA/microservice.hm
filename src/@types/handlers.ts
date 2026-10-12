@@ -1,1 +1,1 @@
-export type HandlerType = "socket.io" | "general" | "error";
+export type HandlerType = "general" | "error";
