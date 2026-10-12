@@ -1,0 +1,21 @@
+{
+  "name": "sensorframe",
+  "version": "1.0.0",
+  "description": "Compact binary TLV frames for sensor data (ESP32/Arduino <-> Node.js). CRC16 + COBS, zero dependencies, no schema compile step.",
+  "main": "index.js",
+  "types": "index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./index.d.ts",
+      "import": "./index.mjs",
+      "require": "./index.js"
+    }
+  },
+  "files": ["index.js", "index.mjs", "index.d.ts", "src/", "README.md"],
+  "scripts": {
+    "test": "node --test"
+  },
+  "engines": { "node": ">=18" },
+  "keywords": ["esp32", "arduino", "serial", "binary", "tlv", "cobs", "crc16", "iot", "sensor"],
+  "license": "UNLICENSED"
+}

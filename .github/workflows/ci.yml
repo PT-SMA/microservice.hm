@@ -1,0 +1,31 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  hm:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: denoland/setup-deno@v2
+        with:
+          # The ecosystem pin. Deno 2.9 broke deno.land/x/socket_io@0.2.1 for
+          # the services that serve socket.io (the 2026-08-19 tracker outage);
+          # this one does not, but stays on the shared version.
+          deno-version: v2.8.x
+      - run: deno fmt --check
+      - run: deno lint
+      # A hard gate from the first commit: nothing pre-existing to excuse.
+      - run: deno task check
+      # package.json is the changesets manifest; deno.json must not carry a
+      # second version. See FMS-Backend/docs/ecosystem/versioning.md.
+      - run: deno task verify:version
+      # vendor/ is a byte-identical mirror of the device repo. There is no
+      # upstream checkout here, so this proves "not edited" (L1) and prints
+      # "L2 SKIPPED" — run it locally with the sibling checkout for L2.
+      - run: deno task vendor:verify
+      # Hermetic: no Redis, no device.
+      - run: deno task test

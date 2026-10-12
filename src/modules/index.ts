@@ -1,2 +1,1 @@
-export { redisClient } from "./redis.ts";
-export * from "./emitter.ts";
+export * from "./redis.ts";

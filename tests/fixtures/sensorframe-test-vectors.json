@@ -1,0 +1,159 @@
+[
+  {
+    "name": "hour-meter telemetry",
+    "description": "Typical totalizer/hour-meter report: 4 sensors.",
+    "header": {
+      "msgType": 1,
+      "seq": 1,
+      "deviceId": 305419896,
+      "timestamp": 3600
+    },
+    "records": [
+      {
+        "tag": 1,
+        "fmt": "u32",
+        "value": 3600,
+        "note": "runSeconds"
+      },
+      {
+        "tag": 2,
+        "fmt": "u32",
+        "value": 1234,
+        "note": "totalCount"
+      },
+      {
+        "tag": 3,
+        "fmt": "bool",
+        "value": true,
+        "note": "alternator"
+      },
+      {
+        "tag": 4,
+        "fmt": "i16",
+        "value": 234,
+        "note": "temperature x10 (23.4 C)"
+      }
+    ],
+    "packetHex": "0101010078563412100e00000105100e00000205d20400000308010404ea00186c",
+    "frameHex": "040101010778563412100e01050105100e01050205d20401070308010404ea03186c00",
+    "crc": "0x6c18",
+    "packetSize": 33,
+    "frameSize": 35
+  },
+  {
+    "name": "heartbeat",
+    "description": "No records; header full of zeros shows COBS at work.",
+    "header": {
+      "msgType": 5,
+      "seq": 0,
+      "deviceId": 0,
+      "timestamp": 0
+    },
+    "records": [],
+    "packetHex": "010500000000000000000000820e",
+    "frameHex": "03010501010101010101010103820e00",
+    "crc": "0x0e82",
+    "packetSize": 14,
+    "frameSize": 16
+  },
+  {
+    "name": "all formats",
+    "description": "One record per fmt code, including negatives and bytes.",
+    "header": {
+      "msgType": 2,
+      "seq": 65535,
+      "deviceId": 4294967295,
+      "timestamp": 1700000000
+    },
+    "records": [
+      {
+        "tag": 10,
+        "fmt": "u8",
+        "value": 255
+      },
+      {
+        "tag": 11,
+        "fmt": "i8",
+        "value": -128
+      },
+      {
+        "tag": 12,
+        "fmt": "u16",
+        "value": 65535
+      },
+      {
+        "tag": 13,
+        "fmt": "i16",
+        "value": -300
+      },
+      {
+        "tag": 14,
+        "fmt": "u32",
+        "value": 4000000000
+      },
+      {
+        "tag": 15,
+        "fmt": "i32",
+        "value": -2000000000
+      },
+      {
+        "tag": 16,
+        "fmt": "f32",
+        "value": 1.5
+      },
+      {
+        "tag": 17,
+        "fmt": "bool",
+        "value": false
+      },
+      {
+        "tag": 18,
+        "fmt": "bytes",
+        "value": "68692100",
+        "note": "hex: 'hi!' + 0x00"
+      },
+      {
+        "tag": 19,
+        "fmt": "u64",
+        "value": "18446744073709551615"
+      },
+      {
+        "tag": 20,
+        "fmt": "i64",
+        "value": "-1"
+      },
+      {
+        "tag": 21,
+        "fmt": "f64",
+        "value": -2.25
+      }
+    ],
+    "packetHex": "0102ffffffffffff00f153650a01ff0b02800c03ffff0d04d4fe0e0500286bee0f06006cca8810070000c03f11080012090468692100130affffffffffffffff140bffffffffffffffff150c00000000000002c06822",
+    "frameHex": "090102ffffffffffff14f153650a01ff0b02800c03ffff0d04d4fe0e0506286bee0f06066cca8810070105c03f11080712090468692117130affffffffffffffff140bffffffffffffffff150c01010101010502c0682200",
+    "crc": "0x2268",
+    "packetSize": 86,
+    "frameSize": 88
+  },
+  {
+    "name": "command reset counter",
+    "description": "Node -> device COMMAND: tag 100 = reset totalizer to 0.",
+    "header": {
+      "msgType": 3,
+      "seq": 42,
+      "deviceId": 305419896,
+      "timestamp": 0
+    },
+    "records": [
+      {
+        "tag": 100,
+        "fmt": "u32",
+        "value": 0
+      }
+    ],
+    "packetHex": "01032a007856341200000000640500000000e310",
+    "frameHex": "0401032a057856341201010103640501010103e31000",
+    "crc": "0x10e3",
+    "packetSize": 20,
+    "frameSize": 22
+  }
+]

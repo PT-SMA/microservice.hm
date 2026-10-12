@@ -1,0 +1,90 @@
+{
+  "repo": "embedded-totalizer-hour-meter",
+  "commit": "b5c08760311f442b14b42ca541f6c6b1be5fa260",
+  "generatedAt": "2026-10-12T06:24:12.743Z",
+  "files": [
+    {
+      "path": "vendor/hour-meter/sensorframe/js/package.json",
+      "upstream": "sensorframe/js/package.json",
+      "sha256": "af0657d23b9b36e6bab1565550288e61d606a51cd177c97cc45b40bbbae13295"
+    },
+    {
+      "path": "vendor/hour-meter/sensorframe/js/index.js",
+      "upstream": "sensorframe/js/index.js",
+      "sha256": "a34251162c5f16125b6c6b1b4c63b513c039d59dc61a61490ecbdde2e907b95b"
+    },
+    {
+      "path": "vendor/hour-meter/sensorframe/js/index.d.ts",
+      "upstream": "sensorframe/js/index.d.ts",
+      "sha256": "f99bb0ddda94a115b8f6386bcdfc79d9faa1120a762ca69a8dd084f7c7736a6f"
+    },
+    {
+      "path": "vendor/hour-meter/sensorframe/js/src/cobs.js",
+      "upstream": "sensorframe/js/src/cobs.js",
+      "sha256": "2c944c5487a867a69bba9c63c838c47e6d27506a0ee9a1764e6bf73472495535"
+    },
+    {
+      "path": "vendor/hour-meter/sensorframe/js/src/codec.js",
+      "upstream": "sensorframe/js/src/codec.js",
+      "sha256": "1406c8b903ef7bbde895e3dde6533423b79e3b0b89212a25ca7e373fb1270e6b"
+    },
+    {
+      "path": "vendor/hour-meter/sensorframe/js/src/constants.js",
+      "upstream": "sensorframe/js/src/constants.js",
+      "sha256": "71673e2bc8355dfddab176f771dedb88939a65bae28db66ff1695b9391541564"
+    },
+    {
+      "path": "vendor/hour-meter/sensorframe/js/src/crc16.js",
+      "upstream": "sensorframe/js/src/crc16.js",
+      "sha256": "f29f6fd4a5ea0f5b5df84744d4537331bbcfd67029b4b6dd499f48d6c4b68c6e"
+    },
+    {
+      "path": "vendor/hour-meter/sensorframe/js/src/errors.js",
+      "upstream": "sensorframe/js/src/errors.js",
+      "sha256": "684e240db8d6ad42d4a02695f2819055dd2c881264ce98a78f4cab89cbf54a52"
+    },
+    {
+      "path": "vendor/hour-meter/sensorframe/js/src/formats.js",
+      "upstream": "sensorframe/js/src/formats.js",
+      "sha256": "edc332e01022f99583db34e2464583ef610504f8e408e2d6ff14d3d40e82437f"
+    },
+    {
+      "path": "vendor/hour-meter/sensorframe/js/src/stream.js",
+      "upstream": "sensorframe/js/src/stream.js",
+      "sha256": "dfff1c95031f9e95da903f813faf2a0c0143c125c16381aaf7b41c21789a6a29"
+    },
+    {
+      "path": "vendor/hour-meter/configurator/src/links.ts",
+      "upstream": "configurator/src/links.ts",
+      "sha256": "3225fb8504fc4f7d7c12c3c430948a7b31ac229a4f655bc1977d772506403426"
+    },
+    {
+      "path": "vendor/hour-meter/configurator/src/sensorframe.ts",
+      "upstream": "configurator/src/sensorframe.ts",
+      "sha256": "a4cdf3ab0907a4c4cd7b60a2db69874e45b741989041ee897460d55c52687c40"
+    },
+    {
+      "path": "vendor/hour-meter/configurator/src/device.ts",
+      "upstream": "configurator/src/device.ts",
+      "sha256": "6044ffbe6b9c103a75bb2786a0b98881a3609ca898724ae5c0fec7a8c1c0dba6"
+    },
+    {
+      "path": "vendor/hour-meter/configurator/src/tags.ts",
+      "upstream": "configurator/src/tags.ts",
+      "sha256": "10d6e43e27edc9ce636034479864e6faaec5fb17445cce02298943a6210e8134"
+    },
+    {
+      "path": "tests/fixtures/sensorframe-test-vectors.json",
+      "upstream": "sensorframe/test-vectors.json",
+      "sha256": "a7b2cc194d6b142550ed6d0eff51e7d95f6c84ddc4e1d7d4a779e41da5e57387"
+    },
+    {
+      "path": "tests/fixtures/frames.json",
+      "generatedFrom": [
+        "esp32/docs/FRAME-CATALOG.md",
+        "esp32/docs/INTEGRATION-GUIDE.md"
+      ],
+      "sha256": "880c54f341edd834ba3edb0ce9253980a4c220eae6aa8c044e9a1af7c542f2ed"
+    }
+  ]
+}
