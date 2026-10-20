@@ -1,12 +1,27 @@
 import { Hono } from "hono";
 import { EventEmitter } from "node:events";
-import { HM_CHANNELS, HM_EVENTS } from "consts";
+import {
+  GPS_CHANNEL,
+  HM_CHANNELS,
+  HM_EVENTS,
+  HOUR_METER_DIRECTION,
+  HOUR_METER_DIRECTION_RECORD,
+  HOUR_METER_FORWARD_AXIS,
+  HOUR_METER_REVERSE_MAX_KMH,
+} from "consts";
+import { isForwardAxis } from "direction";
 import {
   AppErrorHandler,
   HourMeterCommandHandler,
   HourMeterHandler,
+  TravelDirectionHandler,
 } from "handlers";
-import { redisClient, redisPubClient, redisSubscriberClient } from "modules";
+import {
+  DirectionRecorder,
+  redisClient,
+  redisPubClient,
+  redisSubscriberClient,
+} from "modules";
 import { HourMeterSensor, type HourMeterSensorOptions } from "sensors";
 import type { HourMeterPublisher } from "types";
 /**
@@ -53,6 +68,15 @@ export interface AppDeps {
   sensor?: HourMeterSensorOptions;
   publisher?: HourMeterPublisher;
   redis?: RedisLink;
+  /** travel direction; defaults to the HOUR_METER_DIRECTION* env */
+  direction?: {
+    enabled?: boolean;
+    forwardAxis?: string;
+    reverseMaxKmh?: number;
+    /** null: no staleness timer (tests call tick) */
+    tickMs?: number | null;
+    recordDir?: string;
+  };
 }
 
 export class MainApp {
@@ -65,7 +89,9 @@ export class MainApp {
   private errorHandler = new AppErrorHandler();
   private handler: HourMeterHandler;
   private commandHandler?: HourMeterCommandHandler;
-  private subscribed = false;
+  /** the travel-direction estimator's feed, when the feature is on */
+  direction?: TravelDirectionHandler;
+  private subscribed = new Set<string>();
   private redis: RedisLink;
   private redisRetry?: ReturnType<typeof setTimeout>;
   private stopped = false;
@@ -73,7 +99,9 @@ export class MainApp {
   constructor(private deps: AppDeps = {}) {
     // the version before anything else can fail
     console.log(`${this.name} v${this.version} starting`);
-    this.handler = new HourMeterHandler(deps.publisher);
+    this.handler = new HourMeterHandler(deps.publisher, {
+      direction: () => this.direction?.snapshot() ?? null,
+    });
     this.redis = deps.redis ?? redisLink;
 
     /**
@@ -120,7 +148,11 @@ export class MainApp {
       if (this.sensor === undefined) {
         return c.json({ healthy: false, status: "STARTING" }, 503);
       }
-      const health = { ...this.sensor.health(), redis: this.redis.status() };
+      const health = {
+        ...this.sensor.health(),
+        redis: this.redis.status(),
+        ...(this.direction ? { direction: this.direction.health() } : {}),
+      };
       return c.json(health, health.healthy ? 200 : 503);
     });
 
@@ -144,6 +176,7 @@ export class MainApp {
     );
     this.emitter.on(HM_EVENTS.telemetry, this.handler.handle);
     this.emitter.on(HM_EVENTS.event, this.handler.handle);
+    this.initDirection();
   }
 
   private initSensor() {
@@ -160,13 +193,15 @@ export class MainApp {
     if (this.stopped) return;
     try {
       await this.redis.connect();
-      // geofencer's settings commands; once — node-redis re-subscribes itself
-      if (!this.subscribed && this.commandHandler) {
-        await this.redis.subscribe(
+      // each once — node-redis re-subscribes by itself after a reconnect
+      if (this.commandHandler) {
+        await this.subscribeOnce(
           HM_CHANNELS.command,
           this.commandHandler.handle,
         );
-        this.subscribed = true;
+      }
+      if (this.direction) {
+        await this.subscribeOnce(GPS_CHANNEL, this.direction.onGpsMessage);
       }
       if (attempt > 0) console.log("Redis connected after retry");
     } catch (err) {
@@ -183,10 +218,48 @@ export class MainApp {
     }
   }
 
+  private async subscribeOnce(
+    channel: string,
+    listener: (message: string) => unknown,
+  ): Promise<void> {
+    if (this.subscribed.has(channel)) return;
+    await this.redis.subscribe(channel, listener);
+    this.subscribed.add(channel);
+  }
+
+  /**
+   * Travel direction (forward / reversing / stopped) from the IMU stream and
+   * microservice.gps. Off with HOUR_METER_DIRECTION=false (excavators); an
+   * invalid HOUR_METER_FORWARD_AXIS is logged and switches it off — it must
+   * not stop the hour meter.
+   */
+  private initDirection() {
+    const d = this.deps.direction ?? {};
+    if (!(d.enabled ?? HOUR_METER_DIRECTION)) return;
+    const axis = d.forwardAxis ?? HOUR_METER_FORWARD_AXIS;
+    if (!isForwardAxis(axis)) {
+      console.error(
+        `HOUR_METER_FORWARD_AXIS=${axis} is not one of +x, -x, +y, -y: travel direction is off`,
+      );
+      return;
+    }
+    const recordDir = d.recordDir ?? HOUR_METER_DIRECTION_RECORD;
+    this.direction = new TravelDirectionHandler({
+      forwardAxis: axis,
+      reverseMaxKmh: d.reverseMaxKmh ?? HOUR_METER_REVERSE_MAX_KMH,
+      publisher: this.handler,
+      recorder: recordDir ? new DirectionRecorder(recordDir) : null,
+      tickMs: d.tickMs === undefined ? 1000 : d.tickMs,
+    });
+    this.direction.attach(this.emitter);
+    this.direction.start();
+  }
+
   /** Close the device link cleanly (SIGTERM, tests). */
   async stop(): Promise<void> {
     this.stopped = true;
     clearTimeout(this.redisRetry);
+    this.direction?.stop();
     await this.sensor?.stop();
   }
 }

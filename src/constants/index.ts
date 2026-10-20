@@ -30,4 +30,26 @@ export const HOUR_METER_RECONNECT_DELAY_MS = Number(
 export const HOUR_METER_TIME_SYNC =
   (Deno.env.get("HOUR_METER_TIME_SYNC") ?? "true") === "true";
 
+/**
+ * Travel direction (forward / reversing / stopped) from the IMU stream and
+ * microservice.gps. Off on excavators: a board in the cab turns with the
+ * house, not with the tracks.
+ */
+export const HOUR_METER_DIRECTION =
+  (Deno.env.get("HOUR_METER_DIRECTION") ?? "true") === "true";
+/** Which board axis points to the vehicle's front: +x, -x, +y or -y. */
+export const HOUR_METER_FORWARD_AXIS =
+  Deno.env.get("HOUR_METER_FORWARD_AXIS") ??
+    "+x";
+/**
+ * Above this GPS speed the unit is taken to be going forward (evidence, and
+ * the mount self-check). 0 turns it off — graders and compactors reverse fast.
+ */
+export const HOUR_METER_REVERSE_MAX_KMH = Number(
+  Deno.env.get("HOUR_METER_REVERSE_MAX_KMH") ?? "20",
+);
+/** A directory to record the direction inputs to (calibration), or unset. */
+export const HOUR_METER_DIRECTION_RECORD =
+  Deno.env.get("HOUR_METER_DIRECTION_RECORD") || undefined;
+
 export * from "./hour-meter.ts";

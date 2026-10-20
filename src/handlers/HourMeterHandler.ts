@@ -6,9 +6,15 @@ import {
   toHourMeterUpdate,
   toStateHash,
 } from "helpers";
+import type { DirectionChange, DirectionSnapshot } from "direction";
 import { type DecodedMessage, MSG } from "hour-meter";
 import { redisPublisher } from "modules";
-import type { BootSummary, HandlerType, HourMeterPublisher } from "types";
+import type {
+  BootSummary,
+  HandlerType,
+  HourMeterPublisher,
+  TravelDirectionUpdate,
+} from "types";
 
 /** What the sensor knows about the device that a single frame does not. */
 export interface FrameContext {
@@ -25,7 +31,12 @@ export interface FrameContext {
  *   a consumer that hears the message can always read the state it describes.
  * - EVENT → publish `hour-meter:event`; a boot also updates the boot facts in
  *   the hash.
- * - anything else (the 10 Hz IMU stream, ACKs) → nothing.
+ * - anything else (the IMU stream, ACKs) → nothing.
+ * - a travel-direction change (`publishDirectionChange`) → merge it into
+ *   `hour-meter:state`, then publish `travel-direction:update`.
+ *
+ * Every write goes through one chain, in order: a direction merged into the
+ * hash cannot be overwritten by a replace that was already in flight.
  *
  * Never throws. A Redis failure is logged once per outage and the reading is
  * dropped: the reader must never stop over a dependency it does not have.
@@ -39,6 +50,8 @@ export class HourMeterHandler extends BaseHandler {
   #boot: BootSummary = { bootCount: 0 };
   #failing = false;
   #dropped = 0;
+  #direction: () => DirectionSnapshot | null;
+  #chain: Promise<void> = Promise.resolve();
 
   /**
    * `publisher` defaults to Redis; `tests/handler.test.ts` passes a recorder,
@@ -49,33 +62,81 @@ export class HourMeterHandler extends BaseHandler {
     {
       newId = () => crypto.randomUUID(),
       now = () => Date.now(),
-    }: { newId?: () => string; now?: () => number } = {},
+      direction = () => null,
+    }: {
+      newId?: () => string;
+      now?: () => number;
+      /** the travel-direction estimator's state; null while it is off */
+      direction?: () => DirectionSnapshot | null;
+    } = {},
   ) {
     super();
+    this.#direction = direction;
     this.#publisher = publisher;
     this.#newId = newId;
     this.#now = now;
   }
 
-  override async handle(
+  override handle(
     msg: DecodedMessage,
     context: FrameContext = {},
   ): Promise<void> {
-    try {
-      if (msg.msgType === MSG.TELEMETRY) await this.#publishUpdate(msg);
-      else if (msg.msgType === MSG.EVENT) {
-        await this.#publishEvent(msg, context.bootCount ?? 0);
-      } else return;
-      this.#recovered();
-    } catch (err) {
-      this.#failed(err);
+    if (msg.msgType === MSG.TELEMETRY) {
+      return this.#enqueue(() => this.#publishUpdate(msg));
     }
+    if (msg.msgType === MSG.EVENT) {
+      return this.#enqueue(() =>
+        this.#publishEvent(msg, context.bootCount ?? 0)
+      );
+    }
+    return Promise.resolve();
+  }
+
+  /** A change of the travel direction: into the hash first, then announced. */
+  publishDirectionChange(
+    change: DirectionChange,
+    deviceId: string | null,
+  ): Promise<void> {
+    return this.#enqueue(async () => {
+      const changedAt = new Date(change.changedAtMs).toISOString();
+      await this.#publisher.mergeHash(HM_STATE_KEY, {
+        travelDirection: change.travelDirection,
+        travelDirectionChangedAt: changedAt,
+      });
+      const message: TravelDirectionUpdate = {
+        uuid: this.#newId(),
+        ...(deviceId === null ? {} : { deviceId }),
+        changedAt,
+        travelDirection: change.travelDirection,
+        previousTravelDirection: change.previousTravelDirection,
+        basis: change.basis,
+        correction: change.correction,
+      };
+      await this.#publisher.publish(
+        HM_CHANNELS.travelDirection,
+        JSON.stringify(message),
+      );
+    });
+  }
+
+  #enqueue(job: () => Promise<void>): Promise<void> {
+    const run = this.#chain.then(async () => {
+      try {
+        await job();
+        this.#recovered();
+      } catch (err) {
+        this.#failed(err);
+      }
+    });
+    this.#chain = run;
+    return run;
   }
 
   async #publishUpdate(msg: DecodedMessage) {
     const update = toHourMeterUpdate(msg, {
       uuid: this.#newId(),
       now: this.#now(),
+      direction: this.#direction(),
     });
     if (update === null) {
       console.warn(

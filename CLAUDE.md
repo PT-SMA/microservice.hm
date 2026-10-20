@@ -21,6 +21,12 @@ is **geofencer** on the same vehicle.
   `output`, `uartBaud` and `bluetooth` stay read-only and `btPin` is never sent:
   each can cut this service's own link or expose the device. Only
   `redisSubscriberClient` may `subscribe()`.
+- Travel direction lives in `src/direction/` (pure: every input carries its
+  time; nothing reads a clock) and every threshold in `src/direction/tuning.ts`
+  — not field-calibrated; change thresholds only there, and replay a recording
+  (`scripts/replay-direction.ts`) before and after. Never use the firmware's
+  roll/pitch to remove gravity: they already contain the acceleration. The
+  device simulator cannot reverse; `tests/_vehicle-sim.ts` can.
 - Never reopen the port just because the device is quiet: opening USB reboots
   the ESP32 and can lose up to 60 s of hour meter. The sensor probes (`get=3`)
   first; keep it so.

@@ -12,7 +12,12 @@ export const HM_CHANNELS = Object.freeze({
   command: "hour-meter:command",
   /** here → geofencer: one per command, matched by `requestId`. */
   reply: "hour-meter:reply",
+  /** here → geofencer: each change of the travel direction. */
+  travelDirection: "travel-direction:update",
 });
+
+/** microservice.gps's fixes on the same Redis (speed, course) — read, never written. */
+export const GPS_CHANNEL = "microservice.gps";
 
 /**
  * Device settings that `hour-meter:command` may read but not change. Each one
@@ -44,6 +49,8 @@ export const HM_STATE_KEY = "hour-meter:state";
 export const HM_EVENTS = Object.freeze({
   telemetry: "hm:telemetry",
   event: "hm:event",
+  /** IMU stream frames (msgType 128), with `{ missedFrames }` */
+  imu: "hm:imu",
 });
 
 /** A header timestamp below this (2000-01-01) is seconds since boot, not UTC. */

@@ -15,8 +15,10 @@
     "fmt": "deno fmt",
     "fmt:check": "deno fmt --check",
     // Hermetic: no Redis, no device. --allow-net=127.0.0.1 is for the
-    // boot-resilience suite, which points the reader at a closed local port.
-    "test": "deno test --allow-read --allow-env --allow-net=127.0.0.1 tests/",
+    // boot-resilience suite, which points the reader at a closed local port;
+    // --allow-write and --allow-run for the recorder → replay round trip
+    // (a temp dir, and `deno` itself).
+    "test": "deno test --allow-read --allow-env --allow-net=127.0.0.1 --allow-write --allow-run=deno tests/",
     // vendor/hour-meter is a byte-identical mirror of the device's codec and
     // reader (see vendor/hour-meter/README.md). Never edit it by hand.
     "vendor:sync": "deno run --allow-read --allow-write=vendor,tests/fixtures --allow-run=git --allow-env=HM_UPSTREAM_PATH scripts/vendor-sync.ts",
@@ -57,6 +59,7 @@
     "modules": "./src/modules/index.ts",
     "hour-meter": "./src/modules/hour-meter.ts",
     "sensors": "./src/sensors/index.ts",
+    "direction": "./src/direction/index.ts",
     "consts": "./src/constants/index.ts",
     "types": "./src/@types/index.ts",
     "errors": "./src/errors/index.ts",

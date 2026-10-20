@@ -40,6 +40,10 @@ Deno is pinned to **2.8.x** across the ecosystem.
 | `HOUR_METER_RECONNECT_DELAY_MS` | `5000`                   | pause before reopening a lost link                                                                                                                             |
 | `HOUR_METER_TIME_SYNC`          | `true`                   | send `setTime` when the device reports it lost the time (never with an unset host clock)                                                                       |
 | `LOGGING`                       | `false`                  | one line per TELEMETRY                                                                                                                                         |
+| `HOUR_METER_DIRECTION`          | `true`                   | travel direction (forward / reversing / stopped); **`false` on excavators** — a board in the cab turns with the house, not the tracks                          |
+| `HOUR_METER_FORWARD_AXIS`       | `+x`                     | the board axis pointing to the vehicle's front: `+x`, `-x`, `+y` or `-y`. `/health.direction.mountCheck` says when it looks wrong                              |
+| `HOUR_METER_REVERSE_MAX_KMH`    | `20`                     | above this GPS speed the unit is taken to be going forward; **`0` for graders and compactors**, which reverse fast                                             |
+| `HOUR_METER_DIRECTION_RECORD`   | —                        | a directory to record the direction inputs to, for calibration (`scripts/replay-direction.ts`)                                                                 |
 
 ### Permissions
 
@@ -84,6 +88,51 @@ lastCause, lastStage)`, `status flags …` (on
 change; `timeInvalid`, `rtcBatteryLost`, `eepromMissing`, `storageError` need a
 person), `publish failed, dropping readings until Redis is back` /
 `publishing resumed`.
+
+## Travel direction: forward, reversing, stopped
+
+With `HOUR_METER_DIRECTION` on, every `hour-meter:update` carries
+`travelDirection` — `stopped`, `forward`, `reversing`, `moving` (direction not
+decided yet) or `unknown` — and each change is published at once on
+**`travel-direction:update`** (the hash first). It is estimated in
+`src/direction/` from the IMU stream (msgType 128, which is read here and never
+published) and from `microservice.gps` on the same Redis:
+
+- **launch** — which way the vehicle starts moving from a standstill, from the
+  gravity-free forward acceleration (gravity tracked by the gyro, never the
+  firmware's roll/pitch, which already contain the acceleration);
+- **turns** — lateral acceleration = speed × yaw rate (+ the board's lever arm,
+  learned): its sign is the sign of the speed;
+- **GPS course vs heading** — on straights, the course against a gyro heading
+  anchored to GPS (and the compass, once it has agreed with GPS in three course
+  quadrants);
+- **velocity through short stops** — a speed anchored to steady GPS and
+  integrated through braking, a brief stop and what follows.
+
+A vehicle can only change direction through zero speed, so a decision holds for
+the movement and is confirmed or corrected (`correction: true`) along it.
+
+What it cannot do, stated plainly:
+
+- **Creep below ~1–2 km/h reads `stopped`.** An IMU cannot see steady creep.
+- **The default IMU stream (10 Hz) is too slow for launches.** The device sends
+  snapshots, so idle engine vibration aliases to near-DC; a launch then decides
+  nothing on its own and the state stays `moving` until a turn or GPS settles
+  it. Set **`imuStreamHz` to 100** (50 over Bluetooth) — geofencer's
+  `PATCH /api/hour-meter/settings {"imuStreamHz":100}`; `/health.direction.imu`
+  shows the measured rate and why it is degraded.
+- **The thresholds are not field-calibrated** (`src/direction/tuning.ts`). They
+  are pinned by synthetic drives (`tests/direction.test.ts`; the device
+  simulator cannot reverse). Treat the state as advisory until a session on a
+  real machine: record with `HOUR_METER_DIRECTION_RECORD=<dir>`, replay with
+  `deno run --allow-read --allow-env scripts/replay-direction.ts <files> [--trace]`,
+  tune, replay again (BACKLOG HM-08).
+
+`GET /health` → `direction`: the state, IMU status and measured rate, GPS age,
+gyro bias learned, idle vibration, heading anchor, compass verdict,
+**`mountCheck`** (`ok`, `suspectReversed` or `suspectSwapped` with
+`suggestedAxis` — it only warns, it never changes the setting), lever arm,
+evidence, flips and warnings. It never makes the service unhealthy.
 
 ## Running in a container
 
@@ -144,6 +193,11 @@ calibration and module changes go to **`hour-meter:event`**; the latest reading
 is kept in the hash **`hour-meter:state`**, written before each publish so a
 booting geofencer can seed from it.
 
+With travel direction on, each update also carries `travelDirection`,
+`travelDirectionChangedAt` and `forwardHeadingDeg` (the heading of the vehicle's
+front — `headingDeg` corrected for the mount), and every change goes out on
+**`travel-direction:update`**.
+
 In the other direction geofencer reads and changes the device's settings: it
 publishes **`hour-meter:command`** (`getSettings` / `setSettings`), this service
 checks the change, sends the COMMAND, reads the result back, and answers once on
@@ -168,9 +222,12 @@ src/sensors/hour-meter.ts   the link loop, stale probe, boot tracking, health()
 src/helpers/hour-meter.ts   frame → wire payload (the contract, in code)
 src/handlers/HourMeterHandler.ts  hash, then publish; never throws
 src/handlers/HourMeterCommandHandler.ts  settings commands, one at a time
+src/handlers/TravelDirectionHandler.ts  feeds the estimator; never throws
+src/direction/              travel-direction estimator (pure; tuning.ts holds every threshold)
+scripts/replay-direction.ts replay a calibration recording
 src/helpers/hour-meter-settings.ts  what may be set, validation, read-back
 src/modules/hour-meter.ts   the only import of vendor/
-src/modules/redis.ts        command + publish clients (no offline queue)
+src/modules/redis.ts        command, publish and subscribe clients (no offline queue)
 vendor/hour-meter/          byte-identical mirror of the device's codec + reader
 scripts/vendor-*.ts         sync and verify the mirror
 tests/                      hermetic suite; tests/fixtures/ generated by vendor:sync
