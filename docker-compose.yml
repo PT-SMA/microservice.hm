@@ -1,0 +1,4 @@
+services:
+  tracker:
+    build: .
+    image: ${ADDRESS:-localhost:5080}/microservice.hm:${TAG:-latest}
