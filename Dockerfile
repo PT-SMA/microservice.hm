@@ -1,7 +1,7 @@
 # Deno 2.8.x across the ecosystem (2.9 broke deno.land/x/socket_io for the
 # services that serve it; this one does not, but stays on the shared pin).
 # BusyBox in this image provides the `stty` the serial link needs.
-FROM denoland/deno:alpine-2.8.2
+FROM denoland/deno:debian-2.8.2
 
 WORKDIR /app
 
