@@ -1,3 +1,5 @@
+import type { TravelDirection } from "direction";
+
 /**
  * Wire types of the `hour-meter:*` channels — the contract with geofencer
  * (FMS-Backend/docs/ecosystem/integrations/hm-to-geofencer.md). Optional
@@ -46,6 +48,31 @@ export interface HourMeterUpdate extends HourMeterEnvelope, HourMeterReading {
   headingDeg?: number;
   vibRmsMg?: number;
   vibPeakMg?: number;
+  /**
+   * Which way the unit travels (absent when HOUR_METER_DIRECTION is off):
+   * stopped, forward, reversing, moving (direction not decided) or unknown.
+   */
+  travelDirection?: TravelDirection;
+  /** When `travelDirection` last changed, ISO-8601 UTC. */
+  travelDirectionChangedAt?: string;
+  /**
+   * Heading of the vehicle's front: `headingDeg` corrected for how the board
+   * is mounted (and for the compass offset, once proven against GPS).
+   */
+  forwardHeadingDeg?: number;
+}
+
+/** `travel-direction:update` — one per change of the travel direction. */
+export interface TravelDirectionUpdate {
+  uuid: string;
+  deviceId?: string;
+  changedAt: string;
+  travelDirection: TravelDirection;
+  previousTravelDirection: TravelDirection;
+  /** what decided it: launch, turn, gpsHeading, compass, fastTravel, gpsSpeed, imuStill, shuttle */
+  basis: string[];
+  /** forward ↔ reversing without a stop: an earlier decision was wrong */
+  correction: boolean;
 }
 
 export type HourMeterEventKind =

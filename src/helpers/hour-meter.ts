@@ -19,6 +19,7 @@ import {
   MSG,
   type Value,
 } from "hour-meter";
+import type { DirectionSnapshot } from "direction";
 import type {
   BootSummary,
   HourMeterDevices,
@@ -34,6 +35,8 @@ export interface MessageContext {
   uuid: string;
   /** Adaptor clock, ms. */
   now: number;
+  /** The travel-direction estimator's state, when the feature is on. */
+  direction?: DirectionSnapshot | null;
 }
 
 /** statusFlags bit 18: the device booted without I2C (INTEGRATION-GUIDE §5.5). */
@@ -148,6 +151,18 @@ export function toHourMeterUpdate(
   for (const [from, to, scaled] of OPTIONAL_FIELDS) {
     const value = num(msg.values[from]);
     if (value !== undefined) update[to] = scaled ? centi(value) : value;
+  }
+  const direction = ctx.direction;
+  if (direction) {
+    update.travelDirection = direction.travelDirection;
+    update.travelDirectionChangedAt = new Date(
+      direction.changedAtMs || ctx.now,
+    ).toISOString();
+    if (update.headingDeg !== undefined) {
+      update.forwardHeadingDeg = centi(
+        ((update.headingDeg + direction.headingOffsetDeg) % 360 + 360) % 360,
+      );
+    }
   }
   return update;
 }

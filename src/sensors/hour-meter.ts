@@ -90,9 +90,10 @@ const iso = (ms: number | null) =>
 
 /**
  * Reads the hour meter over its serial link (or a `tcp://` bridge) and emits
- * each decoded frame on the app emitter: `HM_EVENTS.telemetry` (msg) and
- * `HM_EVENTS.event` (msg, { bootCount }). The IMU stream and ACKs are counted,
- * not forwarded.
+ * each decoded frame on the app emitter: `HM_EVENTS.telemetry` (msg),
+ * `HM_EVENTS.event` (msg, { bootCount }) and `HM_EVENTS.imu` (msg,
+ * { missedFrames }) for the IMU stream, which only the travel-direction
+ * estimator reads — it is never published. ACKs are counted.
  *
  * The link loop reopens the port when it closes or fails. It does **not**
  * reopen it just because the device went quiet: opening a USB port toggles
@@ -131,6 +132,9 @@ export class HourMeterSensor extends Sensor {
   // per link session
   private linkFrameAt = 0;
   private lastSeq: number | null = null;
+  /** the IMU stream's own continuity: seq counts every frame, of every type */
+  private lastImuSeq: number | null = null;
+  private nonImuSinceImu = 0;
   private sessionHeard = false;
   private timeSyncOn = false;
 
@@ -284,6 +288,8 @@ export class HourMeterSensor extends Sensor {
     this.device = device;
     this.linkFrameAt = this.now();
     this.lastSeq = null; // seq continuity only means something within a link
+    this.lastImuSeq = null;
+    this.nonImuSinceImu = 0;
     this.sessionHeard = false;
     this.timeSyncOn = false;
     this.silentReason = null;
@@ -356,6 +362,8 @@ export class HourMeterSensor extends Sensor {
     }
     this.deviceId = msg.deviceId;
     this.noteUnknownTags(msg);
+    // before noteBoot moves lastSeq on
+    const missedFrames = this.missedImuFrames(msg);
     this.noteBoot(msg, now);
 
     try {
@@ -381,6 +389,7 @@ export class HourMeterSensor extends Sensor {
           break;
         case MSG.IMU:
           this.frames.imu += 1;
+          this.emitter.emit(HM_EVENTS.imu, msg, { missedFrames });
           break;
         case MSG.ACK:
           this.frames.ack += 1;
@@ -391,6 +400,30 @@ export class HourMeterSensor extends Sensor {
     } catch (err) {
       console.error(`hour meter: a frame listener threw: ${describe(err)}`);
     }
+  }
+
+  /**
+   * IMU stream frames lost before this one. The device's `seq` counts every
+   * frame it sends — TELEMETRY, EVENTs, ACKs too — so the jump since the last
+   * IMU frame, less the other frames received meanwhile, is what was lost
+   * (a frame the device could not send still used up its seq). A restart
+   * (seq backwards) is not a loss: the stream simply begins again.
+   */
+  private missedImuFrames(msg: DecodedMessage): number {
+    if (msg.msgType !== MSG.IMU) {
+      this.nonImuSinceImu += 1;
+      return 0;
+    }
+    let missed = 0;
+    if (this.lastImuSeq !== null) {
+      const jump = (msg.seq - this.lastImuSeq + SEQ_SPAN) % SEQ_SPAN;
+      if (jump > 0 && jump < SEQ_SPAN / 2) {
+        missed = Math.max(0, jump - 1 - this.nonImuSinceImu);
+      }
+    }
+    this.lastImuSeq = msg.seq;
+    this.nonImuSinceImu = 0;
+    return missed;
   }
 
   /**
