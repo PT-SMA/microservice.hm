@@ -19,7 +19,7 @@ import {
   MSG,
   type Value,
 } from "hour-meter";
-import type { DirectionSnapshot } from "direction";
+import type { DirectionSnapshot, ImuSource } from "direction";
 import type {
   BootSummary,
   HourMeterDevices,
@@ -37,6 +37,16 @@ export interface MessageContext {
   now: number;
   /** The travel-direction estimator's state, when the feature is on. */
   direction?: DirectionSnapshot | null;
+  /**
+   * The IMU HOUR_METER_IMU_SOURCE selects; absent = the hour meter's. With
+   * `wt61`, `rollDeg`/`pitchDeg` are the WT61's latest (`wt61Attitude`; left
+   * out while it has none fresh), never TELEMETRY's. `headingDeg` and the
+   * vibration are the hour meter's either way.
+   */
+  imu?: {
+    source: ImuSource;
+    wt61Attitude?: { rollDeg: number; pitchDeg: number } | null;
+  };
 }
 
 /** statusFlags bit 18: the device booted without I2C (INTEGRATION-GUIDE §5.5). */
@@ -148,9 +158,22 @@ export function toHourMeterUpdate(
     statusFlags,
     statusFlagNames: decodeStatusFlags(statusFlags),
   };
+  const imuSource = ctx.imu?.source ?? "hour-meter";
   for (const [from, to, scaled] of OPTIONAL_FIELDS) {
+    // the attitude is the selected IMU's; heading and vibration only exist here
+    if (imuSource === "wt61" && (to === "rollDeg" || to === "pitchDeg")) {
+      continue;
+    }
     const value = num(msg.values[from]);
     if (value !== undefined) update[to] = scaled ? centi(value) : value;
+  }
+  const wt61 = imuSource === "wt61" ? ctx.imu?.wt61Attitude : null;
+  if (wt61) {
+    update.rollDeg = centi(wt61.rollDeg);
+    update.pitchDeg = centi(wt61.pitchDeg);
+  }
+  if (update.rollDeg !== undefined || update.pitchDeg !== undefined) {
+    update.imuSource = imuSource;
   }
   const direction = ctx.direction;
   if (direction) {

@@ -27,6 +27,26 @@ is **geofencer** on the same vehicle.
   (`scripts/replay-direction.ts`) before and after. Never use the firmware's
   roll/pitch to remove gravity: they already contain the acceleration. The
   device simulator cannot reverse; `tests/_vehicle-sim.ts` can.
+- One IMU, chosen by `HOUR_METER_IMU_SOURCE` (`hm` | `wit`), feeds the travel
+  direction, `hour-meter:imu` and `rollDeg`/`pitchDeg` on `hour-meter:update`
+  (`imuSource`) — never a mix; heading and vibration stay the hour meter's.
+  `wit` is a WT61 through `../wt61-driver` (`WT61_URL`, NDJSON over TCP).
+  Contract: `../FMS-Backend/docs/ecosystem/integrations/wt61-driver-to-hm.md`,
+  pinned by `tests/fixtures/wt61/stream-v1.ndjson` — byte-identical to the
+  driver's (`deno task wt61:verify`): change the driver, the contract and both
+  copies together. Only `src/helpers/wt61.ts` reads its lines. Reconnecting that
+  link is harmless (the driver holds the serial port); the USB rule below is
+  not.
+- The IMU can be switched while running (`setImuSource` on `hour-meter:command`,
+  `MainApp.setImuSource`): `stopImu` unhooks and closes what `startImu` made
+  (handlers `detach`, the WT61 link stops), the choice is stored first in
+  `hour-meter:imu-source` (not switched when that fails) and restored over the
+  env at the first Redis connection. The GPS subscription goes through
+  `MainApp.onGps`, so a rebuilt travel direction still gets fixes.
+- `hour-meter:imu` is the selected IMU, decimated (`ImuPublishHandler`, pure
+  core `src/helpers/imu-publish.ts`, `HOUR_METER_IMU_HZ`), with or without
+  travel direction. It is fire and forget — a failed publish is dropped, never
+  queued or retried.
 - Never reopen the port just because the device is quiet: opening USB reboots
   the ESP32 and can lose up to 60 s of hour meter. The sensor probes (`get=3`)
   first; keep it so.

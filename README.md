@@ -29,21 +29,27 @@ Deno is pinned to **2.8.x** across the ecosystem.
 
 ## Configuration (`.env.example` / `src/constants/index.ts`)
 
-| Var                             | Default                  | Meaning                                                                                                                                                        |
-| ------------------------------- | ------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `REDIS_URL`                     | `redis://localhost:6379` | the vehicle's local Redis (the one geofencer subscribes on)                                                                                                    |
-| `PORT`                          | `9000`                   | HTTP: `GET /`, `GET /health`                                                                                                                                   |
-| `HOUR_METER_PORT`               | `/dev/ttyUSB0`           | serial path — prefer `/dev/serial/by-id/…` — `/dev/rfcomm0` (Bluetooth), or `tcp://host:port` (simulator / serial-to-TCP bridge). **Keep the `tcp://` prefix** |
-| `HOUR_METER_BAUD`               | `115200`                 | serial only                                                                                                                                                    |
-| `HOUR_METER_BT_PIN`             | —                        | Bluetooth sessions are locked until unlocked with the device PIN                                                                                               |
-| `HOUR_METER_STALE_MS`           | `15000`                  | no frame this long → probe the device; `/health` 503                                                                                                           |
-| `HOUR_METER_RECONNECT_DELAY_MS` | `5000`                   | pause before reopening a lost link                                                                                                                             |
-| `HOUR_METER_TIME_SYNC`          | `true`                   | send `setTime` when the device reports it lost the time (never with an unset host clock)                                                                       |
-| `LOGGING`                       | `false`                  | one line per TELEMETRY                                                                                                                                         |
-| `HOUR_METER_DIRECTION`          | `true`                   | travel direction (forward / reversing / stopped); **`false` on excavators** — a board in the cab turns with the house, not the tracks                          |
-| `HOUR_METER_FORWARD_AXIS`       | `+x`                     | the board axis pointing to the vehicle's front: `+x`, `-x`, `+y` or `-y`. `/health.direction.mountCheck` says when it looks wrong                              |
-| `HOUR_METER_REVERSE_MAX_KMH`    | `20`                     | above this GPS speed the unit is taken to be going forward; **`0` for graders and compactors**, which reverse fast                                             |
-| `HOUR_METER_DIRECTION_RECORD`   | —                        | a directory to record the direction inputs to, for calibration (`scripts/replay-direction.ts`)                                                                 |
+| Var                             | Default                  | Meaning                                                                                                                                                                                            |
+| ------------------------------- | ------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `REDIS_URL`                     | `redis://localhost:6379` | the vehicle's local Redis (the one geofencer subscribes on)                                                                                                                                        |
+| `PORT`                          | `9000`                   | HTTP: `GET /`, `GET /health`                                                                                                                                                                       |
+| `HOUR_METER_PORT`               | `/dev/ttyUSB0`           | serial path — prefer `/dev/serial/by-id/…` — `/dev/rfcomm0` (Bluetooth), or `tcp://host:port` (simulator / serial-to-TCP bridge). **Keep the `tcp://` prefix**                                     |
+| `HOUR_METER_BAUD`               | `115200`                 | serial only                                                                                                                                                                                        |
+| `HOUR_METER_BT_PIN`             | —                        | Bluetooth sessions are locked until unlocked with the device PIN                                                                                                                                   |
+| `HOUR_METER_STALE_MS`           | `15000`                  | no frame this long → probe the device; `/health` 503                                                                                                                                               |
+| `HOUR_METER_RECONNECT_DELAY_MS` | `5000`                   | pause before reopening a lost link                                                                                                                                                                 |
+| `HOUR_METER_TIME_SYNC`          | `true`                   | send `setTime` when the device reports it lost the time (never with an unset host clock)                                                                                                           |
+| `LOGGING`                       | `false`                  | one line per TELEMETRY                                                                                                                                                                             |
+| `HOUR_METER_DIRECTION`          | `true`                   | travel direction (forward / reversing / stopped); **`false` on excavators** — a board in the cab turns with the house, not the tracks                                                              |
+| `HOUR_METER_FORWARD_AXIS`       | `+x`                     | the board axis pointing to the vehicle's front: `+x`, `-x`, `+y` or `-y`. `/health.direction.mountCheck` says when it looks wrong                                                                  |
+| `HOUR_METER_REVERSE_MAX_KMH`    | `20`                     | above this GPS speed the unit is taken to be going forward; **`0` for graders and compactors**, which reverse fast                                                                                 |
+| `HOUR_METER_DIRECTION_RECORD`   | —                        | a directory to record the direction inputs to, for calibration (`scripts/replay-direction.ts`)                                                                                                     |
+| `HOUR_METER_IMU_SOURCE`         | `hm`                     | which IMU is used and broadcast: `hm` (the hour meter's own, when fitted) or `wit` (a WT61 through wt61-driver) — for the travel direction, `hour-meter:imu`, and `rollDeg`/`pitchDeg` (see below) |
+| `HOUR_METER_IMU_HZ`             | `10`                     | the selected IMU on `hour-meter:imu`, messages per second (each a window's mean); `0` off, at most `50`                                                                                            |
+| `WT61_URL`                      | `tcp://127.0.0.1:6699`   | wt61-driver; read only with `HOUR_METER_IMU_SOURCE=wit`                                                                                                                                            |
+| `WT61_FORWARD_AXIS`             | `+x`                     | the WT61 axis pointing to the vehicle's front (module flat, Z up); `HOUR_METER_FORWARD_AXIS` stays the compass's                                                                                   |
+| `WT61_STALE_MS`                 | `2000`                   | no line from the driver this long → reconnect (harmless: the driver holds the serial port)                                                                                                         |
+| `WT61_RECONNECT_DELAY_MS`       | `2000`                   | pause before reconnecting to the driver                                                                                                                                                            |
 
 ### Permissions
 
@@ -128,6 +134,48 @@ What it cannot do, stated plainly:
   `deno run --allow-read --allow-env scripts/replay-direction.ts <files> [--trace]`,
   tune, replay again (BACKLOG HM-08).
 
+### Which IMU: `HOUR_METER_IMU_SOURCE`
+
+One IMU feeds everything that uses one — never a mix:
+
+|                                             | `hm` (default)                                                       | `wit`                                                                                   |
+| ------------------------------------------- | -------------------------------------------------------------------- | --------------------------------------------------------------------------------------- |
+| the IMU                                     | the hour meter's own stream (msgType 128), when it has an IMU fitted | a WitMotion WT61 read by **wt61-driver** (`../wt61-driver`, Bun) at `WT61_URL`          |
+| travel direction                            | ✓                                                                    | ✓                                                                                       |
+| `hour-meter:imu` (`source`)                 | `hour-meter`                                                         | `wt61`                                                                                  |
+| `rollDeg`/`pitchDeg` on `hour-meter:update` | TELEMETRY's                                                          | the WT61's latest (its own x/y angles); left out while it has none from the last second |
+| mount                                       | `HOUR_METER_FORWARD_AXIS`                                            | `WT61_FORWARD_AXIS` (module flat, Z up)                                                 |
+
+`hour-meter:update` says whose roll and pitch it carries (`imuSource`).
+`headingDeg`, `forwardHeadingDeg` and the vibration stay the hour meter's either
+way: the WT61 has no compass, and its filter removes engine vibration.
+`hour-meter:imu` goes out whether or not travel direction is on; an invalid
+value is logged and leaves no IMU (the hour meter itself goes on).
+
+It can also be switched while running, from geofencer's dev console:
+`setImuSource` on `hour-meter:command` (below) moves everything above to the
+other IMU — the travel direction starts over on it — and keeps the choice in
+**`hour-meter:imu-source`**, which wins over `HOUR_METER_IMU_SOURCE`, also after
+a restart (it is applied once Redis connects), until `setImuSource` with `null`
+clears it. `/health` shows it as `imuSourceOverride`.
+
+### The WT61
+
+The module streams 100 Hz through a 10 Hz on-chip low-pass filter, so nothing
+aliases and the hour meter's `imuStreamHz` no longer matters.
+`HOUR_METER_FORWARD_AXIS` still describes the hour meter's board, whose compass
+`forwardHeadingDeg` comes from.
+
+The link is NDJSON over TCP, protocol v1 — a contract with the driver,
+`../FMS-Backend/docs/ecosystem/integrations/wt61-driver-to-hm.md`, pinned by
+`tests/fixtures/wt61/stream-v1.ndjson`, a byte-identical copy of the driver's
+own (`deno task wt61:verify`). It reconnects after a close or `WT61_STALE_MS` of
+silence — harmless here: the driver holds the module's serial port. When the
+link comes back the estimator drops what it integrated across the hole; an
+hour-meter boot no longer resets it. `GET /health` → `wt61`: the link, the
+driver, its serial port, samples and the cycles it lost (`seq` gaps). Like
+`direction`, it never makes the service unhealthy.
+
 `GET /health` → `direction`: the state, IMU status and measured rate, GPS age,
 gyro bias learned, idle vibration, heading anchor, compass verdict,
 **`mountCheck`** (`ok`, `suspectReversed` or `suspectSwapped` with
@@ -198,6 +246,12 @@ With travel direction on, each update also carries `travelDirection`,
 front — `headingDeg` corrected for the mount), and every change goes out on
 **`travel-direction:update`**.
 
+The IMU `HOUR_METER_IMU_SOURCE` selects — the hour meter's own stream or the
+WT61's — goes out on **`hour-meter:imu`**, decimated to `HOUR_METER_IMU_HZ` (10
+Hz): each message is a window's mean accel (g) and gyro (°/s) in the sensor's
+axes, its latest attitude and, from a WT61, temperature. With or without travel
+direction; geofencer's dev console charts it, and nothing depends on it.
+
 In the other direction geofencer reads and changes the device's settings: it
 publishes **`hour-meter:command`** (`getSettings` / `setSettings`), this service
 checks the change, sends the COMMAND, reads the result back, and answers once on
@@ -205,7 +259,15 @@ checks the change, sends the COMMAND, reads the result back, and answers once on
 `bluetooth` are read-only that way — each can cut the link this service reads
 through — and `btPin` is never sent (`HM_READ_ONLY_SETTINGS` /
 `HM_HIDDEN_SETTINGS` in `src/constants/hour-meter.ts`). Nothing is queued: with
-no device link the answer is `unavailable`.
+no device link the answer is `unavailable`. `getImuSource` / `setImuSource`
+(`imuSource`: `hm`, `wit` or `null`) read and switch the IMU instead, with no
+device involved; the reply's `imu` is `{ source, configured, override }`. A
+choice that cannot be stored in Redis is not switched to.
+
+A WT61 (`HOUR_METER_IMU_SOURCE=wit`) reaches this service over a second
+contract, with wt61-driver —
+`../FMS-Backend/docs/ecosystem/integrations/wt61-driver-to-hm.md`, NDJSON over
+TCP; see "Which IMU".
 
 The payloads are a **contract** with geofencer —
 `../FMS-Backend/docs/ecosystem/integrations/hm-to-geofencer.md`. Update it in
@@ -223,6 +285,8 @@ src/helpers/hour-meter.ts   frame → wire payload (the contract, in code)
 src/handlers/HourMeterHandler.ts  hash, then publish; never throws
 src/handlers/HourMeterCommandHandler.ts  settings commands, one at a time
 src/handlers/TravelDirectionHandler.ts  feeds the estimator; never throws
+src/sensors/wt61.ts         the wt61-driver link (NDJSON over TCP), health()
+src/helpers/wt61.ts         wt61-driver lines → IMU samples (that contract, in code)
 src/direction/              travel-direction estimator (pure; tuning.ts holds every threshold)
 scripts/replay-direction.ts replay a calibration recording
 src/helpers/hour-meter-settings.ts  what may be set, validation, read-back
@@ -230,7 +294,9 @@ src/modules/hour-meter.ts   the only import of vendor/
 src/modules/redis.ts        command, publish and subscribe clients (no offline queue)
 vendor/hour-meter/          byte-identical mirror of the device's codec + reader
 scripts/vendor-*.ts         sync and verify the mirror
-tests/                      hermetic suite; tests/fixtures/ generated by vendor:sync
+scripts/verify-wt61-fixture.ts  the WT61 fixture is the driver's (wt61:verify)
+tests/                      hermetic suite; tests/fixtures/ generated by vendor:sync,
+                            except fixtures/wt61/ (copied from wt61-driver)
 ```
 
 ## Rules

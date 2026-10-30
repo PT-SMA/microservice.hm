@@ -26,7 +26,8 @@
     "release": "deno run --allow-read --allow-write --allow-run --allow-env scripts/release.ts",
     "changeset": "deno run -A npm:@changesets/cli@2.31.0",
     "version-packages": "deno run -A npm:@changesets/cli@2.31.0 version",
-    "verify:version": "deno run --allow-read scripts/verify-version.ts"
+    "verify:version": "deno run --allow-read scripts/verify-version.ts",
+    "wt61:verify": "deno run --allow-read --allow-env=WT61_DRIVER_PATH scripts/verify-wt61-fixture.ts"
   },
   // Keep npm dependencies in Deno's own cache, not a local node_modules. This
   // repo carries a `package.json` as the @changesets/cli manifest (see

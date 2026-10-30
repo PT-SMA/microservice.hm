@@ -73,6 +73,7 @@ Deno.test("every contracted field survives the publish", async () => {
     "headingDeg",
     "hourMeterH",
     "hourMeterS",
+    "imuSource",
     "measuredAt",
     "pitchDeg",
     "receivedAt",

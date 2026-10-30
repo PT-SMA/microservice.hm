@@ -14,6 +14,11 @@ export const HM_CHANNELS = Object.freeze({
   reply: "hour-meter:reply",
   /** here → geofencer: each change of the travel direction. */
   travelDirection: "travel-direction:update",
+  /**
+   * here → geofencer: the travel direction's IMU, decimated to
+   * HOUR_METER_IMU_HZ (10 Hz). For diagnostics; nothing depends on it.
+   */
+  imu: "hour-meter:imu",
 });
 
 /** microservice.gps's fixes on the same Redis (speed, course) — read, never written. */
@@ -41,6 +46,13 @@ export const HM_HIDDEN_SETTINGS: readonly string[] = Object.freeze(["btPin"]);
 
 /** Hash of the latest TELEMETRY, written before each `hour-meter:update`. */
 export const HM_STATE_KEY = "hour-meter:state";
+
+/**
+ * The IMU chosen at runtime (`setImuSource`): `hm` or `wit`. While set it
+ * overrides HOUR_METER_IMU_SOURCE, also after a restart (applied once Redis
+ * connects); `setImuSource` with null deletes it.
+ */
+export const HM_IMU_SOURCE_KEY = "hour-meter:imu-source";
 
 /**
  * In-process emitter events, sensor → handler. Deliberately not the channel

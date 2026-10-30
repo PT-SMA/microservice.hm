@@ -118,10 +118,12 @@ Deno.test("a command parses; without a requestId there is nobody to answer", () 
     requestId: "r1",
     action: "getSettings",
     settings: undefined,
+    imuSource: undefined,
   });
   assertEquals(parseCommand('{"requestId":"r2","action":"reboot"}'), {
     requestId: "r2",
-    error: "unknown action 'reboot' (getSettings, setSettings)",
+    error:
+      "unknown action 'reboot' (getSettings, setSettings, getImuSource, setImuSource)",
   });
   for (
     const message of ["", "nope", "[]", "null", '{"action":"getSettings"}']

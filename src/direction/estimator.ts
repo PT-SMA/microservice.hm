@@ -24,12 +24,22 @@ import type {
   ForwardAxis,
   GpsFix,
   ImuSample,
+  ImuSource,
   Vec3,
 } from "./types.ts";
 import { add, angleDiff, DEG, mean, scale, sub, vec, wrap360 } from "./vec.ts";
 
 export interface EstimatorOptions {
+  /** the IMU's axis that points to the vehicle's front */
   forwardAxis: ForwardAxis;
+  /**
+   * The axis of the board whose `headingDeg` arrives in DeviceStatus (the
+   * hour meter's compass), when that is not the IMU's board; default
+   * `forwardAxis`.
+   */
+  headingAxis?: ForwardAxis;
+  /** only the wording of warnings depends on it; default "hour-meter" */
+  imuSource?: ImuSource;
   /** above this GPS speed the unit is assumed forward; 0 = never assume */
   reverseMaxKmh: number;
   tuning?: DirectionTuning;
@@ -37,10 +47,30 @@ export interface EstimatorOptions {
   onTrace?: (trace: DirectionTrace) => void;
 }
 
+/** How each IMU source is fixed, for the warnings. */
+const IMU_SOURCE_TEXT: Record<
+  ImuSource,
+  { axisEnv: string; absent: string; slow: string }
+> = {
+  "hour-meter": {
+    axisEnv: "HOUR_METER_FORWARD_AXIS",
+    absent: "needs streamMode ≠ 0, imuStreamHz > 0, an IMU fitted",
+    slow: "set imuStreamHz to 100 (50 over Bluetooth)",
+  },
+  wt61: {
+    axisEnv: "WT61_FORWARD_AXIS",
+    absent:
+      "is wt61-driver running at WT61_URL, with the module's serial port open?",
+    slow: "set the WT61 to 115200 baud (100 Hz)",
+  },
+};
+
 export interface DirectionHealth {
   travelDirection: string;
   changedAt: string | null;
+  imuSource: ImuSource;
   forwardAxis: ForwardAxis;
+  headingAxis: ForwardAxis;
   imu: {
     status: "ok" | "absent" | "frozen" | "gap";
     hz: number | null;
@@ -84,8 +114,13 @@ const iso = (
  */
 export class TravelDirectionEstimator {
   readonly forwardAxis: ForwardAxis;
+  readonly headingAxis: ForwardAxis;
+  readonly imuSource: ImuSource;
   readonly #t: DirectionTuning;
+  /** the IMU's board */
   readonly #mount: Mount;
+  /** the compass's board — the same one unless the IMU is a WT61 */
+  readonly #headingMount: Mount;
   readonly #reverseMaxKmh: number;
   readonly #onTrace?: (trace: DirectionTrace) => void;
 
@@ -153,8 +188,11 @@ export class TravelDirectionEstimator {
 
   constructor(options: EstimatorOptions) {
     this.forwardAxis = options.forwardAxis;
+    this.headingAxis = options.headingAxis ?? options.forwardAxis;
+    this.imuSource = options.imuSource ?? "hour-meter";
     this.#t = options.tuning ?? DIRECTION_TUNING;
     this.#mount = mountOf(options.forwardAxis);
+    this.#headingMount = mountOf(this.headingAxis);
     this.#reverseMaxKmh = options.reverseMaxKmh;
     this.#onTrace = options.onTrace;
     const t = this.#t;
@@ -361,7 +399,7 @@ export class TravelDirectionEstimator {
     return {
       travelDirection: this.#sm.published,
       changedAtMs: this.#sm.changedAtMs,
-      headingOffsetDeg: this.#mount.headingOffsetDeg +
+      headingOffsetDeg: this.#headingMount.headingOffsetDeg +
         (compass.status === "trusted" && compass.offsetDeg !== null
           ? compass.offsetDeg
           : 0),
@@ -370,18 +408,25 @@ export class TravelDirectionEstimator {
 
   health(tMs: number): DirectionHealth {
     const compass = this.#compass.verdict(tMs);
-    const mountCheck = this.#mountCheck.verdict(this.forwardAxis, compass.hint);
+    // the compass's offset says something about the IMU's mount only when
+    // both are on the same board
+    const sameBoard = this.imuSource === "hour-meter";
+    const mountCheck = this.#mountCheck.verdict(
+      this.forwardAxis,
+      sameBoard ? compass.hint : null,
+    );
     const hz = this.#clock.hz;
     const degraded = this.#clock.degraded;
     const warnings: string[] = [];
+    const text = IMU_SOURCE_TEXT[this.imuSource];
     const imuStatus = this.#lastImuMs === null ? "absent" : this.#imuStatus;
     if (imuStatus !== "ok") {
       warnings.push(
-        `IMU stream ${imuStatus}: direction from GPS only (needs streamMode ≠ 0, imuStreamHz > 0, an IMU fitted)`,
+        `IMU stream ${imuStatus}: direction from GPS only (${text.absent})`,
       );
     } else if (degraded) {
       warnings.push(
-        `IMU stream ${hz} Hz: launch and stop detection degraded — set imuStreamHz to 100 (50 over Bluetooth)`,
+        `IMU stream ${hz} Hz: launch and stop detection degraded — ${text.slow}`,
       );
     }
     if (
@@ -391,7 +436,7 @@ export class TravelDirectionEstimator {
       warnings.push(
         `idle vibration wanders ${
           this.#stillness.idleFloorMg.toFixed(0)
-        } mg at ${hz} Hz: raise imuStreamHz`,
+        } mg at ${hz} Hz: ${text.slow}`,
       );
     }
     if (
@@ -399,14 +444,23 @@ export class TravelDirectionEstimator {
       mountCheck.status === "suspectSwapped"
     ) {
       warnings.push(
-        `HOUR_METER_FORWARD_AXIS=${this.forwardAxis} looks wrong (${mountCheck.status})` +
+        `${text.axisEnv}=${this.forwardAxis} looks wrong (${mountCheck.status})` +
           (mountCheck.suggestedAxis ? `: try ${mountCheck.suggestedAxis}` : ""),
+      );
+    }
+    if (!sameBoard && compass.hint !== null) {
+      warnings.push(
+        `HOUR_METER_FORWARD_AXIS=${this.headingAxis} looks ${compass.hint}: the compass is ${
+          Math.round(compass.offsetDeg ?? 0)
+        }° off the GPS course`,
       );
     }
     return {
       travelDirection: this.#sm.published,
       changedAt: iso(this.#sm.changedAtMs || null),
+      imuSource: this.imuSource,
       forwardAxis: this.forwardAxis,
+      headingAxis: this.headingAxis,
       imu: {
         status: imuStatus,
         hz,
@@ -959,7 +1013,8 @@ export class TravelDirectionEstimator {
       headingFresh && compass.status === "trusted" && compass.offsetDeg !== null
     ) {
       const forward = wrap360(
-        status!.headingDeg! + this.#mount.headingOffsetDeg + compass.offsetDeg,
+        status!.headingDeg! + this.#headingMount.headingOffsetDeg +
+          compass.offsetDeg,
       );
       const delta = Math.abs(angleDiff(track, forward));
       if (delta <= g.forwardMaxDeg) {
@@ -1007,7 +1062,7 @@ export class TravelDirectionEstimator {
       this.#compass.add(
         tMs,
         course,
-        wrap360(status!.headingDeg! + this.#mount.headingOffsetDeg),
+        wrap360(status!.headingDeg! + this.#headingMount.headingOffsetDeg),
       );
     }
   }

@@ -1,4 +1,10 @@
 import { assert, assertEquals } from "@std/assert";
+import {
+  DIRECTION_TUNING,
+  mountOf,
+  TravelDirectionEstimator,
+  WT61_TUNING,
+} from "direction";
 import { type SimOptions, simulate, type Step } from "./_vehicle-sim.ts";
 import {
   everPublished,
@@ -585,6 +591,55 @@ Deno.test("every mount, set correctly, tells the same story", () => {
       `${axis}:\n${show(transcript)}`,
     );
   }
+});
+
+Deno.test("a WT61 on its own mount beside the hour meter's compass tells the same story", () => {
+  const expected = sequenceOf(drive(reference).transcript);
+  // the WT61 points its −y forward; the hour meter's board (the compass) +x
+  const { transcript, estimator } = drive(
+    reference,
+    { trueMount: "-y", compassMount: "+x" },
+    { forwardAxis: "-y", headingAxis: "+x", imuSource: "wt61" },
+  );
+  assertEquals(sequenceOf(transcript), expected, show(transcript));
+  // forwardHeadingDeg turns the hour meter's heading, not the WT61's axis
+  assertEquals(
+    estimator.snapshot().headingOffsetDeg,
+    mountOf("+x").headingOffsetDeg,
+  );
+  const health = estimator.health(0);
+  assertEquals(
+    [health.imuSource, health.forwardAxis, health.headingAxis],
+    ["wt61", "-y", "+x"],
+  );
+});
+
+Deno.test("a WT61 at rest repeating a reading for a few frames is not a dead stream", () => {
+  // the module zeroes its gyro below 0.122 °/s, so at rest a whole frame can
+  // repeat bit for bit by chance; the hour meter's firmware repeating one
+  // means its IMU died
+  const still = {
+    accelG: { x: 0, y: 0, z: 1 },
+    gyroDps: { x: 0, y: 0, z: 0 },
+    missedFrames: 0,
+  };
+  const statusAfter = (frames: number, wt61: boolean) => {
+    const e = new TravelDirectionEstimator({
+      forwardAxis: "+x",
+      reverseMaxKmh: 20,
+      imuSource: wt61 ? "wt61" : "hour-meter",
+      tuning: wt61 ? WT61_TUNING : DIRECTION_TUNING,
+    });
+    for (let i = 0; i < frames; i++) e.onImu(still, 1000 + i * 10);
+    return e.health(1000 + frames * 10).imu.status;
+  };
+  assertEquals(statusAfter(20, false), "frozen");
+  assertEquals(statusAfter(20, true), "ok");
+  assertEquals(
+    statusAfter(100, true),
+    "frozen",
+    "a second of it is still caught",
+  );
 });
 
 Deno.test("the story does not depend on which way the vehicle faces", () => {

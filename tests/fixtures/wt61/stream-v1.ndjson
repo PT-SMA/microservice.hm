@@ -1,0 +1,7 @@
+{"type":"hello","version":1,"driver":"wt61-driver","driverVersion":"0.1.0","device":"/dev/ttyUSB0","baudRate":115200,"serial":"open","startedAt":"2026-10-29T06:00:00.000Z"}
+{"type":"status","at":"2026-10-29T06:00:00.010Z","serial":"open","samples":0,"checksumErrors":0,"incompleteCycles":0,"droppedBytes":0}
+{"type":"sample","seq":1,"readAt":"2026-10-29T06:00:00.040Z","accelG":{"x":0,"y":0,"z":1},"gyroDps":{"x":0,"y":0,"z":0},"angleDeg":{"x":0,"y":0,"z":0},"temperatureC":33.59}
+{"type":"sample","seq":2,"readAt":"2026-10-29T06:00:00.070Z","accelG":{"x":-0.06005859375,"y":0.22265625,"z":0.99609375},"gyroDps":{"x":-0.9765625,"y":2.01416015625,"z":-0.06103515625},"angleDeg":{"x":-0.999755859375,"y":0.4998779296875,"z":179.9945068359375},"temperatureC":33.62}
+{"type":"sample","seq":4,"readAt":"2026-10-29T06:00:00.120Z","accelG":{"x":15.99951171875,"y":-16,"z":1},"gyroDps":{"x":1999.93896484375,"y":-2000,"z":0},"angleDeg":{"x":-180,"y":90,"z":-90},"temperatureC":33.65}
+{"type":"sample","seq":6,"readAt":"2026-10-29T06:00:00.170Z","accelG":{"x":0.10009765625,"y":0,"z":1},"gyroDps":{"x":0,"y":0,"z":5.9814453125},"angleDeg":{"x":0.0054931640625,"y":-0.010986328125,"z":0.0164794921875},"temperatureC":33.68}
+{"type":"status","at":"2026-10-29T06:00:00.180Z","serial":"open","samples":4,"checksumErrors":1,"incompleteCycles":2,"droppedBytes":17}

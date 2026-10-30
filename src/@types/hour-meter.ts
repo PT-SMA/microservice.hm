@@ -1,4 +1,4 @@
-import type { TravelDirection } from "direction";
+import type { ForwardAxis, ImuSource, TravelDirection, Vec3 } from "direction";
 
 /**
  * Wire types of the `hour-meter:*` channels — the contract with geofencer
@@ -41,9 +41,15 @@ export interface HourMeterUpdate extends HourMeterEnvelope, HourMeterReading {
   statusFlags: number;
   /** Names of the set bits, e.g. `["imuMissing", "magMissing"]`. */
   statusFlagNames: string[];
-  /** Tags 40–44: present only when the device sent them (IMU fitted …). */
+  /**
+   * Tags 40–44: present only when the device sent them (IMU fitted …). With
+   * HOUR_METER_IMU_SOURCE=wit, `rollDeg`/`pitchDeg` are the WT61's instead
+   * (its own axes), present while it streams; `imuSource` says which.
+   */
   rollDeg?: number;
   pitchDeg?: number;
+  /** Whose `rollDeg`/`pitchDeg` these are; present with either of them. */
+  imuSource?: ImuSource;
   /** Magnetic heading of the board — not the GPS course. */
   headingDeg?: number;
   vibRmsMg?: number;
@@ -73,6 +79,37 @@ export interface TravelDirectionUpdate {
   basis: string[];
   /** forward ↔ reversing without a stop: an earlier decision was wrong */
   correction: boolean;
+}
+
+/**
+ * `hour-meter:imu` — the IMU the travel direction reads (`source`), one
+ * message per window of 1 / HOUR_METER_IMU_HZ s. Axes are the sensor's own:
+ * x right, y up the board, z out of it (+1 g flat at rest); `forwardAxis` is
+ * the one that points to the vehicle's front.
+ */
+export interface HourMeterImu {
+  /** the hour meter's, when it is the source */
+  deviceId?: string;
+  source: ImuSource;
+  forwardAxis: ForwardAxis;
+  /** this box's clock, ISO-8601 UTC: the end of the window */
+  at: string;
+  windowMs: number;
+  /** samples averaged into this message */
+  samples: number;
+  /** samples lost in the window, by the source's sequence */
+  missedFrames: number;
+  /** the window's mean, g */
+  accelG: Vec3;
+  /** the window's mean, °/s */
+  gyroDps: Vec3;
+  /**
+   * The latest attitude: x roll, y pitch, z yaw. A WT61's yaw drifts (it has
+   * no magnetometer); the hour meter's z is its magnetic heading.
+   */
+  angleDeg?: Vec3;
+  /** the latest; a WT61 only */
+  temperatureC?: number;
 }
 
 export type HourMeterEventKind =
@@ -118,13 +155,29 @@ export interface HourMeterEvent
 export interface HourMeterCommand {
   /** Chosen by the caller; the reply carries it back. */
   requestId: string;
-  action: "getSettings" | "setSettings";
+  action: "getSettings" | "setSettings" | "getImuSource" | "setImuSource";
   /**
    * `setSettings`: the settings to change, by device name
    * (`{ "telemetryIntervalMs": 2000 }`). The rest stay as they are. All or
    * nothing: one invalid value and nothing is applied.
    */
   settings?: Record<string, number | boolean>;
+  /**
+   * `setImuSource`: `hm` or `wit` (or the wire's `hour-meter` / `wt61`) to
+   * switch to and keep across restarts; null to go back to
+   * HOUR_METER_IMU_SOURCE.
+   */
+  imuSource?: string | null;
+}
+
+/** Which IMU is in use, and why: the `imu` of a get/setImuSource reply. */
+export interface HourMeterImuSourceState {
+  /** the IMU in use now; null when none works (a bad setting) */
+  source: ImuSource | null;
+  /** what HOUR_METER_IMU_SOURCE says; null when it is not hm or wit */
+  configured: ImuSource | null;
+  /** the runtime choice in `hour-meter:imu-source`, overriding it; null when none */
+  override: ImuSource | null;
 }
 
 /** How a command ended. */
@@ -169,6 +222,8 @@ export interface HourMeterReply {
   setting?: string;
   /** `rejected`: the device's ackStatus name (InvalidValue, StorageError …). */
   ackStatus?: string;
+  /** `getImuSource` / `setImuSource`, `ok`: the IMU now in use. */
+  imu?: HourMeterImuSourceState;
   /** Human-readable, for logs and error responses. */
   message?: string;
 }

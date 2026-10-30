@@ -20,6 +20,13 @@ export type TravelDirection =
 /** The board axis that points to the front of the vehicle. */
 export type ForwardAxis = "+x" | "-x" | "+y" | "-y";
 
+/**
+ * Where the IMU stream comes from: the hour meter's own (msgType 128), or a
+ * WT61 through wt61-driver — then the compass is still the hour meter's, on
+ * another board.
+ */
+export type ImuSource = "hour-meter" | "wt61";
+
 /** What contributes to the per-segment evidence (positive = forward). */
 export type EvidenceSource =
   | "launch"
