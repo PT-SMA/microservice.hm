@@ -59,6 +59,11 @@ export interface SimOptions {
   streamHz?: number;
   /** how the board is really mounted */
   trueMount?: ForwardAxis;
+  /**
+   * how the compass's board is mounted, when it is not the IMU's (a WT61 next
+   * to the hour meter); default trueMount
+   */
+  compassMount?: ForwardAxis;
   engineToneHz?: number;
   engineToneMg?: number;
   accelNoiseMg?: number;
@@ -167,6 +172,7 @@ export function simulate(steps: Step[], options: SimOptions = {}): SimRun {
   };
   const rand = rng(o.seed);
   const mount = mountOf(o.trueMount);
+  const compassMount = mountOf(options.compassMount ?? o.trueMount);
   const every = Math.max(1, Math.round(SAMPLE_HZ / o.streamHz));
   const kfA = [
     new Kalman1D(5e-4, 4e-4),
@@ -330,7 +336,8 @@ export function simulate(steps: Step[], options: SimOptions = {}): SimRun {
 
     // TELEMETRY each second
     if (n % SAMPLE_HZ === 0) {
-      const boardHeading = psi - mount.headingOffsetDeg + compass.offsetDeg +
+      const boardHeading = psi - compassMount.headingOffsetDeg +
+        compass.offsetDeg +
         compass.ampDeg * Math.sin((psi - compass.phaseDeg) * DEG);
       events.push({
         tMs: tMs() + 5,

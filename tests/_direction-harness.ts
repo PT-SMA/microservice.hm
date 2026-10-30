@@ -1,8 +1,10 @@
 import {
   type DirectionTrace,
   type ForwardAxis,
+  type ImuSource,
   type TravelDirection,
   TravelDirectionEstimator,
+  WT61_TUNING,
 } from "direction";
 import { parseGpsFix } from "helpers";
 import type { SimRun } from "./_vehicle-sim.ts";
@@ -17,6 +19,10 @@ export interface Transition {
 
 export interface HarnessOptions {
   forwardAxis?: ForwardAxis;
+  /** the compass board's axis, when the IMU is on another board (a WT61) */
+  headingAxis?: ForwardAxis;
+  /** `wt61` also takes its tuning, as TravelDirectionHandler does */
+  imuSource?: ImuSource;
   reverseMaxKmh?: number;
   /** collect the estimator's calibration trace */
   trace?: boolean;
@@ -32,6 +38,9 @@ export function runDirection(run: SimRun, options: HarnessOptions = {}) {
   const estimator = new TravelDirectionEstimator({
     onTrace: options.trace ? (t) => traces.push(t) : undefined,
     forwardAxis: options.forwardAxis ?? "+x",
+    headingAxis: options.headingAxis,
+    imuSource: options.imuSource,
+    tuning: options.imuSource === "wt61" ? WT61_TUNING : undefined,
     reverseMaxKmh: options.reverseMaxKmh ?? 20,
     onChange: (c) =>
       transcript.push({

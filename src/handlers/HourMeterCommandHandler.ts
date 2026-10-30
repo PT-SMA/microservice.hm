@@ -1,7 +1,9 @@
 import { BaseHandler } from "classes/bases";
 import { HM_CHANNELS } from "consts";
+import type { ImuSource } from "direction";
 import {
   parseCommand,
+  parseImuSource,
   readSettings,
   settingsSchema,
   validateSettings,
@@ -15,7 +17,12 @@ import {
 } from "hour-meter";
 import { redisPublisher } from "modules";
 import { DeviceUnavailableError } from "sensors";
-import type { HandlerType, HourMeterPublisher, HourMeterReply } from "types";
+import type {
+  HandlerType,
+  HourMeterImuSourceState,
+  HourMeterPublisher,
+  HourMeterReply,
+} from "types";
 
 /** What the handler needs from the device side — `HourMeterSensor`. */
 export interface DeviceCommander {
@@ -24,6 +31,13 @@ export interface DeviceCommander {
     options?: { timeoutMs?: number; retries?: number },
   ): Promise<DecodedMessage>;
   currentDeviceId(): string | null;
+}
+
+/** What the handler needs to read and switch the IMU — `MainApp`. */
+export interface ImuSourceControl {
+  get(): HourMeterImuSourceState;
+  /** switch to `source` and keep it; null goes back to HOUR_METER_IMU_SOURCE */
+  set(source: ImuSource | null): Promise<HourMeterImuSourceState>;
 }
 
 const describe = (err: unknown) =>
@@ -39,6 +53,9 @@ const describe = (err: unknown) =>
  *   read-only and out-of-range settings never reach the device), sent as one
  *   COMMAND (the device applies it all or nothing), then read back with
  *   `get=2` so the reply says what the device holds now.
+ * - `getImuSource` / `setImuSource`: which IMU this service reads, and a
+ *   switch to the other (`ImuSourceControl`, kept across restarts) — no
+ *   device involved.
  *
  * Commands run one at a time, so a change and its read-back cannot interleave
  * with another request. Exactly one reply per command that carries a
@@ -49,15 +66,18 @@ export class HourMeterCommandHandler extends BaseHandler {
 
   #device: DeviceCommander;
   #publisher: Pick<HourMeterPublisher, "publish">;
+  #imu: ImuSourceControl | null;
   #queue: Promise<void> = Promise.resolve();
 
   constructor(
     device: DeviceCommander,
     publisher: Pick<HourMeterPublisher, "publish"> = redisPublisher,
+    imu: ImuSourceControl | null = null,
   ) {
     super();
     this.#device = device;
     this.#publisher = publisher;
+    this.#imu = imu;
   }
 
   /** Resolves once this command has been answered. */
@@ -83,7 +103,11 @@ export class HourMeterCommandHandler extends BaseHandler {
       };
     } else {
       try {
-        reply = parsed.action === "setSettings"
+        reply = parsed.action === "getImuSource"
+          ? this.#getImuSource(parsed.requestId)
+          : parsed.action === "setImuSource"
+          ? await this.#setImuSource(parsed.requestId, parsed.imuSource)
+          : parsed.action === "setSettings"
           ? await this.#setSettings(parsed.requestId, parsed.settings)
           : await this.#getSettings(parsed.requestId);
       } catch (err) {
@@ -98,6 +122,47 @@ export class HourMeterCommandHandler extends BaseHandler {
         `hour-meter: could not reply to ${reply.requestId}: ${describe(err)}`,
       );
     }
+  }
+
+  #getImuSource(requestId: string): HourMeterReply {
+    if (this.#imu === null) return this.#noImuControl(requestId);
+    return { ...this.#identity(requestId), status: "ok", imu: this.#imu.get() };
+  }
+
+  async #setImuSource(
+    requestId: string,
+    value: unknown,
+  ): Promise<HourMeterReply> {
+    if (this.#imu === null) return this.#noImuControl(requestId);
+    const source = value === null
+      ? null
+      : typeof value === "string"
+      ? parseImuSource(value)
+      : undefined;
+    if (source === undefined || (value !== null && source === null)) {
+      return {
+        requestId,
+        status: "invalid",
+        message: `imuSource must be hm, wit or null, not ${
+          JSON.stringify(value ?? "nothing")
+        }`,
+      };
+    }
+    const imu = await this.#imu.set(source);
+    console.log(
+      `hour-meter: IMU ${
+        source === null ? "back to HOUR_METER_IMU_SOURCE" : `set to ${source}`
+      } by request ${requestId}; in use: ${imu.source ?? "none"}`,
+    );
+    return { ...this.#identity(requestId), status: "ok", imu };
+  }
+
+  #noImuControl(requestId: string): HourMeterReply {
+    return {
+      requestId,
+      status: "invalid",
+      message: "this service cannot switch its IMU",
+    };
   }
 
   async #getSettings(requestId: string): Promise<HourMeterReply> {

@@ -213,3 +213,16 @@ export const DIRECTION_TUNING = {
 };
 
 export type DirectionTuning = typeof DIRECTION_TUNING;
+
+/**
+ * A WT61 through wt61-driver (WT61_URL) instead of the hour meter's stream.
+ * Only what differs: the module zeroes its gyro below a static threshold
+ * (0.122 °/s by default), so at rest accel + gyro can repeat bit for bit for
+ * a few frames by chance. A dead stream is called after half a second of it
+ * at 100 Hz. The module low-pass filters at 10 Hz (default bandwidth) before
+ * its 100 Hz output, so nothing aliases and no other threshold moves.
+ */
+export const WT61_TUNING: DirectionTuning = {
+  ...DIRECTION_TUNING,
+  stream: { ...DIRECTION_TUNING.stream, frozenFrames: 50 },
+};

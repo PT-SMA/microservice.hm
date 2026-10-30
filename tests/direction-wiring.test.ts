@@ -1,6 +1,12 @@
 import { assert, assertEquals } from "@std/assert";
 import { type AppDeps, MainApp } from "app";
-import { GPS_CHANNEL, HM_CHANNELS, HM_EVENTS, HM_STATE_KEY } from "consts";
+import {
+  GPS_CHANNEL,
+  HM_CHANNELS,
+  HM_EVENTS,
+  HM_STATE_KEY,
+  WT61_EVENTS,
+} from "consts";
 import { mountOf } from "direction";
 import { HourMeterHandler, TravelDirectionHandler } from "handlers";
 import { parseGpsFix, toHourMeterUpdate, toImuSample } from "helpers";
@@ -8,13 +14,14 @@ import { codec, linkPair, MSG } from "hour-meter";
 import { DirectionRecorder } from "modules";
 import { EventEmitter } from "node:events";
 import { HourMeterSensor } from "sensors";
-import type { HourMeterPublisher } from "types";
+import type { HourMeterPublisher, Wt61Sample } from "types";
 import {
   buildFrame,
   decodeCatalog,
   sleep,
   TELEMETRY_VALUES,
 } from "./_helpers.ts";
+import { simulate } from "./_vehicle-sim.ts";
 
 /**
  * The plumbing around the travel-direction estimator: what it reads (IMU
@@ -216,7 +223,11 @@ Deno.test("the direction handler never lets an error out, and says unknown when 
   assertEquals(changes, ["unknown"]);
 });
 
-function appWith(direction: AppDeps["direction"]) {
+function appWith(
+  direction: AppDeps["direction"],
+  wt61?: AppDeps["wt61"],
+  imuSource = "hm",
+) {
   const subscribed: string[] = [];
   const app = new MainApp({
     publisher: {
@@ -243,6 +254,8 @@ function appWith(direction: AppDeps["direction"]) {
       staleMs: 60_000,
     },
     direction: { tickMs: null, ...direction },
+    imuSource,
+    wt61: wt61 ?? {},
   });
   return { app, subscribed };
 }
@@ -338,5 +351,154 @@ Deno.test("a recording replays to the same transcript", async () => {
     }
   } finally {
     await Deno.remove(dir, { recursive: true });
+  }
+});
+
+// ------------------------------------------------------------------ the WT61
+
+const wt61Sample = (
+  seq: number,
+  accelG = { x: 0, y: 0, z: 1 },
+  gyroDps = { x: 0, y: 0, z: 0 },
+): Wt61Sample => ({
+  type: "sample",
+  seq,
+  readAt: "2026-10-29T06:00:00.000Z",
+  accelG,
+  gyroDps,
+});
+
+function wt61Handler(now: () => number, changes: string[] = []) {
+  const handler = new TravelDirectionHandler({
+    forwardAxis: "+x",
+    imuSource: "wt61",
+    headingAxis: "+x",
+    reverseMaxKmh: 20,
+    tickMs: null,
+    now,
+    publisher: {
+      publishDirectionChange: (c) => {
+        changes.push(c.travelDirection);
+        return Promise.resolve();
+      },
+    },
+  });
+  const emitter = new EventEmitter();
+  handler.attach(emitter);
+  return { handler, emitter, changes };
+}
+
+Deno.test("with a WT61, its samples feed the estimator and the hour meter's IMU frames do not", () => {
+  let now = 1_000;
+  const { handler, emitter } = wt61Handler(() => now);
+  for (let i = 0; i < 50; i++) {
+    now += 10;
+    emitter.emit(HM_EVENTS.imu, decodeCatalog("imu-filtered"), {
+      missedFrames: 0,
+    });
+  }
+  assertEquals(handler.health().imu.status, "absent");
+  for (let i = 0; i < 50; i++) {
+    now += 10;
+    // a live module: the last bit moves
+    const accelG = { x: 0, y: 0, z: 1 + (i % 2) / 2048 };
+    emitter.emit(WT61_EVENTS.sample, wt61Sample(i + 1, accelG), {
+      missedFrames: 0,
+    });
+  }
+  const health = handler.health();
+  assertEquals(health.imu.status, "ok");
+  assertEquals(health.imuSource, "wt61");
+});
+
+Deno.test("a launch through the WT61 path is decided forward", () => {
+  // the generator's IMU stands in for the module: same axes, g and °/s
+  const run = simulate([
+    { hold: 12 },
+    { ramp: { to: 5, accel: 0.5 } },
+    { turn: { yawDps: 10, durS: 6 } },
+    { hold: 6 },
+  ]);
+  let now = run.events[0]?.tMs ?? 0;
+  const { handler, emitter, changes } = wt61Handler(() => now);
+  let seq = 0, nextTick = now + 1000;
+  for (const e of run.events) {
+    now = e.tMs;
+    while (now >= nextTick) handler.estimator.tick(nextTick += 1000);
+    if (e.kind === "imu") {
+      emitter.emit(
+        WT61_EVENTS.sample,
+        wt61Sample(++seq, e.sample.accelG, e.sample.gyroDps),
+        { missedFrames: 0 },
+      );
+    } else if (e.kind === "gps") handler.onGpsMessage(e.raw);
+  }
+  assert(changes.includes("forward"), changes.join(" → "));
+  assert(!changes.includes("reversing"), changes.join(" → "));
+});
+
+Deno.test("the WT61 link coming back resets the estimator; an hour-meter boot does not", () => {
+  const resets: string[] = [];
+  const { handler, emitter } = wt61Handler(() => 0);
+  handler.estimator.onReset = (reason) => void resets.push(reason);
+  emitter.emit(WT61_EVENTS.link, true); // the first time: nothing to void
+  emitter.emit(HM_EVENTS.event, decodeCatalog("event-boot"));
+  assertEquals(resets, []);
+  emitter.emit(WT61_EVENTS.link, false, "wt61-driver link closed");
+  emitter.emit(WT61_EVENTS.link, true);
+  assertEquals(resets, ["link"]);
+
+  // the hour meter's own IMU: its boot does reset
+  const own = new TravelDirectionHandler({
+    forwardAxis: "+x",
+    reverseMaxKmh: 20,
+    tickMs: null,
+    publisher: { publishDirectionChange: () => Promise.resolve() },
+  });
+  const ownResets: string[] = [];
+  own.estimator.onReset = (reason) => void ownResets.push(reason);
+  own.onEvent(decodeCatalog("event-boot"));
+  assertEquals(ownResets, ["boot"]);
+});
+
+Deno.test("the app reads the IMU from wt61-driver when HOUR_METER_IMU_SOURCE=wit", async () => {
+  const listener = Deno.listen({ hostname: "127.0.0.1", port: 0 });
+  const url = `tcp://127.0.0.1:${(listener.addr as Deno.NetAddr).port}`;
+  const served = (async () => {
+    for await (const conn of listener) {
+      const hello = Deno.readTextFileSync(
+        new URL("./fixtures/wt61/stream-v1.ndjson", import.meta.url),
+      ).split("\n").slice(0, 2).join("\n") + "\n";
+      await conn.write(new TextEncoder().encode(hello)).catch(() => {});
+    }
+  })();
+  const on = appWith({ enabled: true, forwardAxis: "+x" }, {
+    url,
+    forwardAxis: "-y",
+  }, "wit");
+  const badAxis = appWith({ enabled: true }, { url, forwardAxis: "up" }, "wit");
+  const badUrl = appWith({ enabled: true }, { url: "127.0.0.1:6699" }, "wit");
+  try {
+    await sleep(100);
+    const body = await (await on.app.fetch(new Request("http://x/health")))
+      .json();
+    assertEquals(body.direction.imuSource, "wt61");
+    assertEquals(body.direction.forwardAxis, "-y");
+    assertEquals(body.direction.headingAxis, "+x");
+    assertEquals(body.wt61.url, url);
+    assertEquals(body.wt61.usable, true);
+    assertEquals(body.wt61.driver, "wt61-driver 0.1.0");
+    assert(body.healthy !== undefined);
+    for (const off of [badAxis, badUrl]) {
+      const b = await (await off.app.fetch(new Request("http://x/health")))
+        .json();
+      assert(!("direction" in b), "a bad WT61 setting switches direction off");
+      assert(!("wt61" in b));
+      assert(!off.subscribed.includes(GPS_CHANNEL));
+    }
+  } finally {
+    await Promise.all([on.app.stop(), badAxis.app.stop(), badUrl.app.stop()]);
+    listener.close();
+    await served.catch(() => {});
   }
 });

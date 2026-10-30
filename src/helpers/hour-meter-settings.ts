@@ -14,6 +14,8 @@ import type { HourMeterCommand, HourMeterSettingSchema } from "types";
 const ACTIONS = new Set<HourMeterCommand["action"]>([
   "getSettings",
   "setSettings",
+  "getImuSource",
+  "setImuSource",
 ]);
 
 function typeOf(tag: number): HourMeterSettingSchema["type"] {
@@ -145,6 +147,8 @@ export interface ParsedCommand {
   requestId: string;
   action: HourMeterCommand["action"];
   settings?: unknown;
+  /** `setImuSource`: checked later too */
+  imuSource?: unknown;
 }
 
 /**
@@ -164,17 +168,23 @@ export function parseCommand(
   if (raw === null || typeof raw !== "object" || Array.isArray(raw)) {
     return null;
   }
-  const { requestId, action, settings } = raw as Record<string, unknown>;
+  const { requestId, action, settings, imuSource } = raw as Record<
+    string,
+    unknown
+  >;
   if (typeof requestId !== "string" || requestId === "") return null;
   if (!ACTIONS.has(action as HourMeterCommand["action"])) {
     return {
       requestId,
-      error: `unknown action '${String(action)}' (getSettings, setSettings)`,
+      error: `unknown action '${
+        String(action)
+      }' (getSettings, setSettings, getImuSource, setImuSource)`,
     };
   }
   return {
     requestId,
     action: action as HourMeterCommand["action"],
     settings,
+    imuSource,
   };
 }

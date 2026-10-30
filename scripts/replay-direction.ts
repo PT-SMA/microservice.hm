@@ -6,12 +6,15 @@
  *
  *   deno run --allow-read --allow-env scripts/replay-direction.ts rec/direction-20261015T07.ndjson [more…]
  *   … --axis=+y --reverse-max=0   override what the recording's config line says
+ *   … --heading-axis=+x            the compass board's axis (a WT61 recording)
  *   … --trace                      also print evidence, launches, turn fits
  */
 
 import {
+  DIRECTION_TUNING,
   isForwardAxis,
   TravelDirectionEstimator,
+  WT61_TUNING,
 } from "../src/direction/index.ts";
 import { parseGpsFix } from "../src/helpers/gps-fix.ts";
 
@@ -46,14 +49,24 @@ if (typeof axis !== "string" || !isForwardAxis(axis)) {
   console.error(`invalid forward axis ${axis}`);
   Deno.exit(2);
 }
+const headingAxis = flag("heading-axis") ?? (config as Line).headingAxis ??
+  axis;
+if (typeof headingAxis !== "string" || !isForwardAxis(headingAxis)) {
+  console.error(`invalid heading axis ${headingAxis}`);
+  Deno.exit(2);
+}
 const reverseMaxKmh = Number(
   flag("reverse-max") ?? (config as Line).reverseMaxKmh ?? 20,
 );
+const imuSource = (config as Line).imuSource === "wt61" ? "wt61" : "hour-meter";
 
 const origin = lines[0]?.t ?? 0;
 const at = (t: number) => `${((t - origin) / 1000).toFixed(1).padStart(8)}s`;
 const estimator = new TravelDirectionEstimator({
   forwardAxis: axis,
+  headingAxis,
+  imuSource,
+  tuning: imuSource === "wt61" ? WT61_TUNING : DIRECTION_TUNING,
   reverseMaxKmh,
   onChange: (c) =>
     console.log(
@@ -73,7 +86,9 @@ const estimator = new TravelDirectionEstimator({
 });
 
 console.log(
-  `replaying ${lines.length} records, forward axis ${axis}, reverse max ${reverseMaxKmh} km/h`,
+  `replaying ${lines.length} records, IMU ${imuSource}, forward axis ${axis}` +
+    (headingAxis !== axis ? ` (compass ${headingAxis})` : "") +
+    `, reverse max ${reverseMaxKmh} km/h`,
 );
 let nextTick = origin + 1000;
 for (const line of lines) {

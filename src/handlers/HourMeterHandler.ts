@@ -2,6 +2,7 @@ import { BaseHandler } from "classes/bases";
 import { HM_CHANNELS, HM_STATE_KEY, LOGGING } from "consts";
 import {
   bootHash,
+  type MessageContext,
   toHourMeterEvent,
   toHourMeterUpdate,
   toStateHash,
@@ -51,6 +52,7 @@ export class HourMeterHandler extends BaseHandler {
   #failing = false;
   #dropped = 0;
   #direction: () => DirectionSnapshot | null;
+  #imu: () => MessageContext["imu"];
   #chain: Promise<void> = Promise.resolve();
 
   /**
@@ -63,15 +65,19 @@ export class HourMeterHandler extends BaseHandler {
       newId = () => crypto.randomUUID(),
       now = () => Date.now(),
       direction = () => null,
+      imu = () => undefined,
     }: {
       newId?: () => string;
       now?: () => number;
       /** the travel-direction estimator's state; null while it is off */
       direction?: () => DirectionSnapshot | null;
+      /** the selected IMU (HOUR_METER_IMU_SOURCE); undefined = the hour meter's */
+      imu?: () => MessageContext["imu"];
     } = {},
   ) {
     super();
     this.#direction = direction;
+    this.#imu = imu;
     this.#publisher = publisher;
     this.#newId = newId;
     this.#now = now;
@@ -137,6 +143,7 @@ export class HourMeterHandler extends BaseHandler {
       uuid: this.#newId(),
       now: this.#now(),
       direction: this.#direction(),
+      imu: this.#imu(),
     });
     if (update === null) {
       console.warn(

@@ -23,6 +23,7 @@ const ctx = { uuid: UUID, now: NOW };
 const IMU_FIELDS = [
   "rollDeg",
   "pitchDeg",
+  "imuSource",
   "headingDeg",
   "vibRmsMg",
   "vibPeakMg",
@@ -54,6 +55,7 @@ Deno.test("the catalog TELEMETRY frame maps to the exact contract payload", () =
       statusFlagNames: [],
       rollDeg: 2.5,
       pitchDeg: -0.48,
+      imuSource: "hour-meter",
       headingDeg: 33.5,
       vibRmsMg: 37,
       vibPeakMg: 103,
