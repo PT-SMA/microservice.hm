@@ -27,7 +27,8 @@
     "changeset": "deno run -A npm:@changesets/cli@2.31.0",
     "version-packages": "deno run -A npm:@changesets/cli@2.31.0 version",
     "verify:version": "deno run --allow-read scripts/verify-version.ts",
-    "wt61:verify": "deno run --allow-read --allow-env=WT61_DRIVER_PATH scripts/verify-wt61-fixture.ts"
+    "wt61:verify": "deno run --allow-read --allow-env=WT61_DRIVER_PATH scripts/verify-wt61-fixture.ts",
+    "fleet-contract:verify": "deno run --allow-read --allow-env=FLEET_CONTRACT_CANONICAL scripts/verify-fleet-contract.ts"
   },
   // Keep npm dependencies in Deno's own cache, not a local node_modules. This
   // repo carries a `package.json` as the @changesets/cli manifest (see
@@ -44,8 +45,14 @@
   "unstable": ["detect-cjs"],
   // The mirror keeps upstream's formatting (single quotes, 120 columns);
   // reformatting it would break the hashes vendor:verify checks.
+  // docs/FLEET_CONTRACT.md is a byte copy of FMS-Backend's contract (fleet-contract:verify)
   "fmt": {
-    "exclude": ["vendor/", "tests/fixtures/"]
+    "exclude": [
+      "vendor/",
+      "tests/fixtures/",
+      "docs/FLEET_CONTRACT.md",
+      "docs/fleet-contract.manifest.json"
+    ]
   },
   "lint": {
     "exclude": ["vendor/", "tests/fixtures/"]
