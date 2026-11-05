@@ -8,10 +8,11 @@ SensorFrame v1, and publishes to the vehicle's local Redis: `hour-meter:update`
 hash `hour-meter:state` (latest, written before each publish). Its one consumer
 is **geofencer** on the same vehicle.
 
-- The Redis surface is a contract:
-  `../FMS-Backend/docs/ecosystem/integrations/hm-to-geofencer.md`. Update it in
-  the same commit as any change to `src/helpers/hour-meter.ts` (the only frame →
-  payload mapping), `src/@types/hour-meter.ts` or `src/constants/hour-meter.ts`.
+- The Redis surface is a contract: `../FMS-Backend/docs/FLEET_CONTRACT.md` §4
+  (byte copy here: `docs/FLEET_CONTRACT.md`, never edited here). Update it — and
+  bump its version — in the same commit as any change to
+  `src/helpers/hour-meter.ts` (the only frame → payload mapping),
+  `src/@types/hour-meter.ts` or `src/constants/hour-meter.ts`.
 - `vendor/hour-meter/` is a byte-identical mirror of the device repo's codec and
   reader. **Never edit it** — change upstream, then `deno task vendor:sync`.
   Only `src/modules/hour-meter.ts` imports it. `deno.json` needs
@@ -72,9 +73,9 @@ link handling lands with:
    `FMS-Backend/docs/ecosystem/versioning.md`.
 3. **A doc touch in the same commit** when the change affects an endpoint, Redis
    channel/key, schema, or business rule: the contract that owns the surface
-   (`FMS-Backend/docs/ecosystem/integrations/hm-to-geofencer.md`) and any
-   handbook chapter whose facts moved. Full policy: `FMS-Backend/docs/README.md`
-   § "Keeping these docs alive" — never hand-write volatile facts (branches,
+   (`FMS-Backend/docs/FLEET_CONTRACT.md` §4, version bumped) and any handbook
+   chapter whose facts moved. Full policy: `FMS-Backend/docs/README.md` §
+   "Keeping these docs alive" — never hand-write volatile facts (branches,
    versions, counts); name the command instead.
 
 Use the canonical vocabulary in `FMS-Backend/docs/ecosystem/glossary/`.

@@ -1,0 +1,15 @@
+{
+  "contract": "fleet",
+  "contractVersion": "1.0.1",
+  "normalize": "verbatim",
+  "document": {
+    "path": "docs/FLEET_CONTRACT.md",
+    "sha256": "sha256:6b0a01d0600220c52f43b6630fca187db0a4f02ba03c8e631ab32f71d74fcbbc"
+  },
+  "mirrors": [
+    "geofencer",
+    "microservice.tracker",
+    "microservice.hm",
+    "microservice.gps"
+  ]
+}

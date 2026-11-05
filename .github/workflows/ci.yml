@@ -23,6 +23,9 @@ jobs:
       # package.json is the changesets manifest; deno.json must not carry a
       # second version. See FMS-Backend/docs/ecosystem/versioning.md.
       - run: deno task verify:version
+      # docs/FLEET_CONTRACT.md is a byte copy of FMS-Backend's contract. With no
+      # FMS-Backend checkout here this proves it was not edited.
+      - run: deno task fleet-contract:verify
       # vendor/ is a byte-identical mirror of the device repo. There is no
       # upstream checkout here, so this proves "not edited" (L1) and prints
       # "L2 SKIPPED" — run it locally with the sibling checkout for L2.

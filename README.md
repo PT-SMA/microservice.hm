@@ -270,10 +270,11 @@ contract, with wt61-driver —
 TCP; see "Which IMU".
 
 The payloads are a **contract** with geofencer —
-`../FMS-Backend/docs/ecosystem/integrations/hm-to-geofencer.md`. Update it in
-the same commit as any change to `src/helpers/hour-meter*.ts`,
-`src/@types/hour-meter.ts` or `src/constants/hour-meter.ts`.
-`tests/mapping.test.ts` pins the mapping against the firmware's own frames.
+`../FMS-Backend/docs/FLEET_CONTRACT.md` §4 (copy here:
+`docs/FLEET_CONTRACT.md`). Update it in the same commit as any change to
+`src/helpers/hour-meter*.ts`, `src/@types/hour-meter.ts` or
+`src/constants/hour-meter.ts`. `tests/mapping.test.ts` pins the mapping against
+the firmware's own frames.
 
 ## Layout
 
