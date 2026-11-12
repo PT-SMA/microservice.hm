@@ -1,10 +1,10 @@
 {
   "contract": "fleet",
-  "contractVersion": "1.2.0",
+  "contractVersion": "1.3.0",
   "normalize": "verbatim",
   "document": {
     "path": "docs/FLEET_CONTRACT.md",
-    "sha256": "sha256:1d93de9c930887796779111f1a44f435bc84a91fcc606d69e2bd3dbcd8fb18f9"
+    "sha256": "sha256:260145951b4a474ff313b0be63ee2a3cc0503316bc426ca48b4e237ba7cd4080"
   },
   "mirrors": [
     "geofencer",

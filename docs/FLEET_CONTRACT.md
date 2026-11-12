@@ -1,6 +1,6 @@
 # Fleet wire contract
 
-<!-- fleet-contract:version 1.2.0 -->
+<!-- fleet-contract:version 1.3.0 -->
 
 The single source of truth for every wire surface between the five services that carry a vehicle's data from the cab to the Platform: GPS fixes, hour-meter readings, geofence crossings, event logs, sessions, cycles, master data and the commands that flow back.
 
@@ -47,7 +47,7 @@ The contract's version is not a service version: it travels with this file, and 
 | Surface | Contract |
 |---|---|
 | Haul-road routing (FMS-Backend ⇄ microservice.route-topology ⇄ FMS-frontend) | `FMS-Backend/docs/HAUL_CONTRACT.md` |
-| In-cab UI (gridlock) ⇄ geofencer | `geofencer/docs/CONTRACT-gridlock.md` |
+| In-cab UI (gridlock, both builds) ⇄ geofencer, and the Platform flows that end on the operator's screen | `FMS-Backend/docs/GRIDLOCK_CONTRACT.md` |
 | wt61-driver → microservice.hm | `FMS-Backend/docs/ecosystem/integrations/wt61-driver-to-hm.md` |
 | Dashboard (FMS-frontend) ⇄ Platform | `FMS-Backend/docs/ecosystem/integrations/web-platform.md` |
 | Box maintenance: map-editor ⇄ update-daemon on the box (its actions, replies, status report, jobs and polling) | `update-daemon/docs/CONTRACT-map-editor.md`. This file covers only the hops it rides: `device:command` (§5) and `unit:command` / `unit:reply` (§7) |
@@ -1545,7 +1545,7 @@ The Platform cannot reach a cab's socket, because cabs connect to the tracker. I
 { "request_id": "01J…", "status": "ack", "outcome": { "status": 200, "data": { … } } }
 ```
 
-- **The allowlist.** `event` is checked against `UNIT_COMMAND_EVENTS`: `session:end`, `session:override`, `auto-cycle:toggle`, `auto-cycle:get`, `master-data:pull`, `device:command`. `timeout_ms` must be 500–30 000. A new command is added to the allowlist, to a geofencer socket handler, to the Platform sender and to this contract in one change.
+- **The allowlist.** `event` is checked against `UNIT_COMMAND_EVENTS`: `session:end`, `session:override`, `auto-cycle:toggle`, `auto-cycle:get`, `master-data:pull`, `device:command`, `voice-note:new`. `timeout_ms` must be 500–30 000. A new command is added to the allowlist, to a geofencer socket handler, to the Platform sender and to this contract in one change.
 - **One generic event.** Every event above is one command, except `device:command`. It is the single generic relay for update-daemon: its payload is the daemon's command, so a new daemon action changes update-daemon, its contract and map-editor, but not the allowlist or the geofencer handler. This is a deliberate exception to "one event per command", and the only one (Compatibility rule 7).
 - **Delivery.** The worker that holds `equipment:{uuid}.socket_id` emits `event` with `payload` **as is**, plus an ack callback.
 - **The cab's ack** is always `{ "status": <number>, "data": … }` or `{ "status": <number>, "errors": [{ "msg": "…" }] }`. An ack without a numeric `status` is reported as `outcome {status: 502, errors: [{msg: "the cab answered without a status"}]}`.
@@ -1695,6 +1695,56 @@ This is map-editor asking a box for its maintenance status, or to update, instal
 - **Older units.** A cab older than 0.4.58 has no handler, so the relay answers `timeout`. An update-daemon that does not know an action answers `invalid`, which the cab acks as 400. Release order: update-daemon, geofencer, microservice.tracker, map-editor.
 - **The Platform sends nothing on this event.**
 
+#### Voice note — `voice-note:new` (tracker → geofencer, with ack; geofencer ≥ 0.4.59)
+
+A dispatcher recorded a voice note for this unit's operator. The Platform has already stored it, audio included, in its own table `voice_notes` (not shared with the tracker), and this command is **only a notice**: the audio never rides the socket, which drops the cab's whole connection above 1 MB. The cab fetches the audio over HTTP from the Platform (§6 "Voice notes"), and also pulls every note it has not stored on each connect and each 60 s tick, so a missed notice costs at most a minute once the cab is online. **Handler:** `geofencer: src/handlers/VoiceNoteSocketHandler.ts`; the store, download, pull and receipt drain are `src/handlers/VoiceNoteHandler.ts`. What the operator sees is `GRIDLOCK_CONTRACT.md` §5 "Voice notes, end to end".
+
+```jsonc
+// bus unit:command (Platform → tracker)
+{ "request_id": "01J…", "equipment_uuid": "6f0e2c1a-…", "event": "voice-note:new", "timeout_ms": 10000,
+  "payload": { "equipment_uuid": "6f0e2c1a-…", "voice_note": {
+    "id": "vn_01JD2W8K3Q4R5S6T7V8W9X0Y1Z",
+    "equipment_uuid": "6f0e2c1a-…",
+    "sender_name": "Base Control — Rina",
+    "mime_type": "audio/webm",
+    "size_bytes": 182344,
+    "duration_ms": 14200,
+    "sha256": "9f2c…",               // 64 lower-case hex digits of the audio bytes
+    "created_at": "2026-11-12T03:15:00.000Z",
+    "expires_at": "2026-11-12T15:15:00.000Z" } } }
+// cab → tracker, the ack: the note is recorded; the download continues in the background
+{ "status": 200, "data": { "id": "vn_01JD…", "state": "downloading" } }   // or "stored", or "played" for a repeat
+{ "status": 400, "errors": [{ "msg": "voice_note.sha256 must be 64 hex digits" }] }
+{ "status": 421, "errors": [{ "msg": "meant for 6f0e2c1a-…, this unit is 9b1d…" }] }
+```
+
+`voice_note` is the Platform's cab row, the same object `GET /api/apps/voice-notes` lists (§6):
+
+| Field | Type | Presence | Notes |
+|---|---|---|---|
+| `id` | string | always | `vn_` + a ULID, minted by the Platform; the idempotency key everywhere. The cab requires `^[A-Za-z0-9_-]{1,64}$`, because it names a file |
+| `equipment_uuid` | string | always | must equal the payload's, else 400; a pulled row for another unit is skipped |
+| `sender_name` | string \| null | always | the dispatcher's name as the operator should see it |
+| `mime_type` | string | always | one of `audio/webm`, `audio/ogg`, `audio/mp4`, `audio/mpeg`, `audio/wav`, without codec parameters |
+| `size_bytes` | integer | always | 1 – 1 048 576 |
+| `duration_ms` | integer \| null | always | as the dashboard measured it; ≤ 120 000; null when unknown |
+| `sha256` | string | always | of the audio bytes; the cab checks it before storing |
+| `created_at`, `expires_at` | ISO string with a time zone | always | a note expires 12 h after it was created (`VOICE_NOTE_TTL_HOURS`). The cab never downloads or shows an expired note: the ack still says `downloading`, and the row is pruned |
+
+**What the cab does, in this order:**
+
+1. A payload that is not an object → 400.
+2. The payload names another unit or none, or the cab has no identity → 421.
+3. `voice_note` missing, or a field above with the wrong type or out of range → 400. Nothing is stored.
+4. It upserts the note's row by `id` (a repeat changes nothing) and answers **200** with the row's state: `downloading` (audio not yet stored), `stored`, or `played`.
+5. In the background it downloads the audio (§6), checks its length against `size_bytes` and its sha256, stores it, tells the in-cab UI (`GRIDLOCK_CONTRACT.md` §4 `voice-note:new`) and reports `delivered_at` (§6).
+6. A throw → 500.
+
+- **Timeout.** The Platform sends `timeout_ms: 10000`. The ack does not wait for the download.
+- **Offline.** An offline cab is `no_socket`. Nothing is queued on the bus: the Platform keeps the note, and the cab's pull on reconnect (§6) delivers it.
+- **The Platform's verdict.** `ack` with 200 → `sent`; `no_socket`, `timeout` or `unreachable` → `queued` ("the cab gets it when it is back online"); `ack` with any other status → `refused`, with the cab's message. In every case the note stays stored and pending until the cab reports it or it expires. `FMS-Backend: src/helpers/voice-notes.ts (voiceNoteOutcome)`.
+- **Older units.** A cab older than 0.4.59 has no handler, so the relay answers `timeout`, and it never pulls: the note expires undelivered. Release order: geofencer, microservice.tracker, the Platform (after its migration), FMS-frontend; the gridlock builds any time after geofencer.
+
 #### A new mine plan — `new:mine-plan` (tracker → geofencer, no ack; geofencer ≥ 0.4.32)
 
 The Platform publishes `mine-plan:create` on the bus right after it writes plans. Its scheduler clones the next shift's plans twenty minutes before the shift, and dispatchers create plans. There is one message per plan, addressed by `equipment_type`: an `Excavator` plan to its excavator, a `Truck` plan to its truck. The tracker validates the message (`microservice.tracker: src/helpers/mine-plan-notice.ts (parseMinePlanCreated)`) and resolves the uuid from `equipment_id` when the Platform sent `null` (`MinePlanHandler`). The worker that holds the unit's socket then emits:
@@ -1818,7 +1868,11 @@ These key names and fields are a contract: renaming one breaks every truck silen
 | Current-event cab grace | `CURRENT_EVENT_CAB_GRACE_MS` (both services, must match) | 2 min |
 | Current-operator TTL | tracker `REDIS_EX` | 6 h |
 | Socket state TTL | tracker `REDIS_EXPIRE` | 13 h (`equipment:{uuid}.socket_id`, `socket:{uuid}`) |
-| Unit command timeout | tracker `unitCommandSchema.timeout_ms` | 500–30 000 ms (the Platform sends 25 s for `master-data:pull`; map-editor 25 s for `device:command`) |
+| Unit command timeout | tracker `unitCommandSchema.timeout_ms` | 500–30 000 ms (the Platform sends 25 s for `master-data:pull`, 10 s for `voice-note:new`; map-editor 25 s for `device:command`) |
+| Voice note limits | Platform `src/helpers/voice-notes.ts`; geofencer `VOICE_NOTE_MAX_BYTES` | ≤ 1 048 576 bytes, ≤ 120 s; expires 12 h after creation (`VOICE_NOTE_TTL_HOURS`) |
+| Voice note download | geofencer `VOICE_NOTE_DOWNLOAD_TIMEOUT_MS`, `VOICE_NOTE_PULL_BUDGET_MS` | 30 s per note; the Platform lists at most 20 per pull; no new download starts once a pull has run 60 s |
+| Voice note pull back-off | geofencer `VOICE_NOTE_PULL_BACKOFF_MS` | after a 404 on `GET /api/apps/voice-notes` (a Platform without voice notes), the tick's pull waits 15 min; a stored download clears it |
+| Voice notes kept on the cab | geofencer `VoiceNoteHandler.prune` | played notes 7 days; unplayed notes until they expire; at most 50, dropping played notes first, then the oldest unplayed; stray files in `db/voice-notes/` are deleted |
 | Device command wait on the cab | geofencer `DEVICE_COMMAND_TIMEOUT_MS` | 20 s for update-daemon's `update:reply`, then 504 |
 | Device command timeout | map-editor `lib/devices/command.ts` | `timeout_ms` 25 000 for every action, so the cab's 504 arrives before the relay's `timeout`; map-editor waits 27 s for `unit:reply` |
 | Excavator beacon max age | tracker `EXCAVATOR_PUBLISH_MAX_AGE_MS` | 2 min |
@@ -1904,7 +1958,10 @@ The `request` interceptor sets these on every call to the Platform (`geofencer: 
 | Every tracker socket connect, the first one included; skipped while `equipment:details.uuid` is empty; one pass at a time; a step is skipped once the pass has run 90 s (`ON_CONNECT_DEADLINE_MS`) | full pull first, then the drains, among them the prestart outbox | `geofencer: src/handlers/NetworkHandler.ts (NetworkHandler.handleConnect)` |
 | A successful equipment handshake | full pull | `geofencer: src/handlers/InitHandler.ts (InitHandler)`, `src/controllers/EquipmentController.ts (EquipmentController.create)` |
 | `master-data:pull` unit command (§5), including the Platform's own push of `locations` + `geofence-tuning` after a location write | the datasets it names, or all | `geofencer: src/handlers/MasterDataSocketHandler.ts` |
-| Every 60 s sync tick, under the cab's `sync:running` lock; also `POST /api/sync { "method": "all" }` on the unit | `GET /api/apps/equipments`, `GET /api/apps/geofences`, the prestart outbox drain | `geofencer: src/utils/others/SyncRunner.ts (SyncRunner.steps)` |
+| Every 60 s sync tick, under the cab's `sync:running` lock; also `POST /api/sync { "method": "all" }` on the unit | `GET /api/apps/equipments`, `GET /api/apps/geofences`, the prestart outbox drain, the voice-note pull and receipt drain (geofencer ≥ 0.4.59) | `geofencer: src/utils/others/SyncRunner.ts (SyncRunner.steps)` |
+| Every tracker socket connect, after the full pull and the session sync, within the pass's 90 s deadline (geofencer ≥ 0.4.59) | the voice-note pull and receipt drain | `geofencer: src/handlers/NetworkHandler.ts (NetworkHandler.handleConnect)` |
+| A `voice-note:new` command (§5) | `GET /api/apps/voice-notes/:id/audio`, then `PATCH /api/apps/voice-notes/:id` | `geofencer: src/handlers/VoiceNoteHandler.ts` |
+| The in-cab UI marks a note played (`GRIDLOCK_CONTRACT.md` §3) | `PATCH /api/apps/voice-notes/:id` | `geofencer: src/handlers/VoiceNoteHandler.ts` |
 | Shift-change slots: `lead_minutes` before each changeover in `settings:shifts` (default 18, set on the unit with `PUT /api/mine-plan-schedule`) and one minute after it (fixed); re-derived every 30 s; 06:30 and 18:30 while `settings:shifts` is empty | `GET /api/apps/mine-plans/:id`, then `GET /api/apps/shifts` | `geofencer: src/schedulers/mine-plan-slots.ts (minePlanSlots)`, `src/app.ts (MainApp.initSchedulers)` |
 | Operator login | `POST /api/operators/auth` | `geofencer: src/controllers/AuthController.ts (AuthController.create)` |
 | Prestart submission | `POST /api/apps/prestart-checks` | `geofencer: src/controllers/PrestartCheckController.ts (PrestartCheckController.create)` |
@@ -2013,6 +2070,29 @@ No auth. `data` is the Platform's `JSON/settings.json` as read by `loadSettings`
 | `name`, `code`, `orgCode` | string | always | site identity |
 | `shifts[].start`, `shifts[].end` | ISO-8601 string | always | only the time of day counts; every reader rebases it onto the current date |
 | `shifts[].label` | string | always | `DAY`, `NIGHT`; the label stored on sessions, plans and cycles |
+
+### Voice notes — `GET /api/apps/voice-notes`, `GET /api/apps/voice-notes/:id/audio`, `PATCH /api/apps/voice-notes/:id` (geofencer → Platform, geofencer ≥ 0.4.59)
+
+The cab's half of a dispatcher voice note (§5 "Voice note"). Code: `FMS-Backend: src/routes/apps/voice-notes.ts`, `src/helpers/voice-notes.ts`; `geofencer: src/handlers/VoiceNoteHandler.ts`. Auth on all three: `token` (`x-api-key`) then `equipmentParser` (`equipment-uuid`); no Bearer, so a note reaches a cab with nobody logged in. **A note of another unit answers 404**, never 403, so a unit cannot learn which ids exist.
+
+**Pending notes — `GET /api/apps/voice-notes`.** The notes of `req.equipment` with `delivered_at` null that have not expired, oldest first, at most 20: `{ "data": { "rows": [ /* the §5 voice_note object */ ] }, "status": true }`. The cab ingests each row it has not stored, exactly as for a `voice-note:new` command.
+
+**The audio — `GET /api/apps/voice-notes/:id/audio`.** The bytes, `Content-Type` = the note's `mime_type`, `Content-Length` = `size_bytes`, `Cache-Control: no-store`. Served while the row exists, expired or not. The cab requests it with `responseType: "arraybuffer"` and a 30 s timeout, and stores it only when the length and sha256 match the row; a mismatch is retried on the next pass.
+
+**Receipts — `PATCH /api/apps/voice-notes/:id`.**
+
+```jsonc
+{ "delivered_at": "2026-11-12T03:15:04.000Z" }                       // the cab stored the audio
+{ "played_at": "2026-11-12T03:16:10.000Z", "played_by_operator_id": 412, "played_by_name": "BUDI S" }
+// → 200
+{ "data": { /* the voice_note object */ "delivered_at": "…", "played_at": "…" }, "status": true }
+```
+
+- **First write wins**, per field: a timestamp already stored is kept, and the answer is still 200, so the cab's retries are idempotent. `played_at` with no `delivered_at` stored also stores `delivered_at` = `played_at`.
+- `played_by_operator_id` / `played_by_name` are stored with the first `played_at` only; both may be null (nobody logged in).
+- 400 when a timestamp is not an ISO date (one without a zone is read as UTC), or when the body has neither `delivered_at` nor `played_at`; 404 for an unknown, deleted or other unit's note. Unknown body fields are ignored, so a newer cab is never refused forever.
+- A receipt that changed the row is announced to dashboards as `update:voice-note` (`web-platform.md`).
+- **On the cab** each receipt is a flag on the local row (`delivered_synced`, `played_synced`), sent as its own PATCH (delivered first, then played) and drained on every connect and tick, after each stored download, and right after the UI marks a note played. A failed PATCH is retried until it lands or the note is pruned; a drain stops early only when the Platform does not answer at all.
 
 ### Equipment handshake — `POST /api/apps/equipments` (geofencer → Platform)
 
@@ -2318,9 +2398,9 @@ map-editor, outside the five services, is a client of the same bus (`map-editor:
 |---|---|---|---|
 | `request_id` | string | always, both | the correlation key. A ULID from the Platform, a UUID (v4) from map-editor; the tracker requires only a non-empty string and echoes it |
 | `equipment_uuid` | string | always (command) | the unit; the tracker finds its socket at `equipment:{uuid}.socket_id` |
-| `event` | string | always (command) | must be in the tracker's allowlist `UNIT_COMMAND_EVENTS`: `session:end`, `session:override`, `auto-cycle:toggle`, `auto-cycle:get`, `master-data:pull`, `device:command` |
+| `event` | string | always (command) | must be in the tracker's allowlist `UNIT_COMMAND_EVENTS`: `session:end`, `session:override`, `auto-cycle:toggle`, `auto-cycle:get`, `master-data:pull`, `device:command`, `voice-note:new` |
 | `payload` | object | always (command) | emitted to the cab as is; shapes in §5 (for `device:command`, in update-daemon's contract) |
-| `timeout_ms` | integer 500–30000 | always (command) | how long the tracker waits for the cab's ack; the Platform sends 5000, 25000 for `master-data:pull`; map-editor sends 25000 for `device:command` |
+| `timeout_ms` | integer 500–30000 | always (command) | how long the tracker waits for the cab's ack; the Platform sends 5000, 25000 for `master-data:pull`, 10000 for `voice-note:new`; map-editor sends 25000 for `device:command` |
 | `status` | `ack` \| `timeout` \| `no_socket` | always (reply) | `ack`: the cab answered; `timeout`: the socket holder got no ack in time; `no_socket`: no worker holds a socket for the unit |
 | `outcome` | `{ status: number, data?, errors?: [{ msg }] }` | with `ack` | the cab's answer; an ack without a numeric `status` becomes `{ status: 502 }` |
 
@@ -2418,6 +2498,17 @@ Each section ends with the rules particular to its surface; these hold for all o
 ## 10. Changelog
 
 Newest first. Every change to this file adds an entry here and bumps the marker under the title (§0).
+
+### 1.3.0 — 2026-11-12
+
+**Added: dispatcher voice notes, `voice-note:new`.** A dispatcher records a note on the dashboard; the Platform stores it (table `voice_notes`, audio in `bytea`, Platform-only) and sends the new allowlisted command `voice-note:new` as a notice, with `timeout_ms` 10 000. geofencer (≥ 0.4.59) records the note, acks 200 at once, downloads the audio over HTTP, checks its length and sha256, stores it and hands it to the in-cab UI (`GRIDLOCK_CONTRACT.md` §3–§5). It also pulls every undelivered note on connect and on each 60 s tick, because a notice to an offline cab is `no_socket` and nothing is queued. It reports `delivered_at` and `played_at` back with first-write-wins receipts. A note expires 12 h after it was created.
+
+- §0 "What is not here" now points at `GRIDLOCK_CONTRACT.md` for the in-cab UI.
+- §5: the allowlist entry, the new subsection "Voice note — `voice-note:new`", and three operational parameters (limits, download, retention on the cab).
+- §6: three new cab → Platform routes, "Voice notes", and their rows in "When geofencer calls the Platform".
+- §7: `voice-note:new` and its `timeout_ms` in the `unit:command` table.
+
+Affects: microservice.tracker (the allowlist entry), geofencer (the handler, the pull and the receipts, 0.4.59), the Platform (the table, the sender, the cab routes). microservice.hm and microservice.gps: mirror only. Release order: the Platform migration, geofencer, microservice.tracker, the Platform, FMS-frontend.
 
 ### 1.2.0 — 2026-11-12
 
