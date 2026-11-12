@@ -1,6 +1,6 @@
 # Fleet wire contract
 
-<!-- fleet-contract:version 1.0.1 -->
+<!-- fleet-contract:version 1.1.0 -->
 
 The single source of truth for every wire surface between the five services that carry a vehicle's data from the cab to the Platform: GPS fixes, hour-meter readings, geofence crossings, event logs, sessions, cycles, master data and the commands that flow back.
 
@@ -2165,7 +2165,7 @@ The keyspace the two share sits on the Platform's `REDIS_URL` client, not on its
 | `mine_equipments` | Platform; tracker sets `status = 'Breakdown'` on a breakdown event log (`microservice.tracker: src/utils/routes/EventLogUtil.ts`), a static update that fires no hooks | both | Platform schema |
 | `mine_plans` | Platform | tracker (`microservice.tracker: src/utils/others/MinePlanUtil.ts (MinePlanUtil)`, `src/helpers/plan-sync.ts`: re-syncs a truck's open session to its plan on every event log) | Platform schema. The Platform's own copy of that rule (`FMS-Backend: src/modules/event-logs.ts`, case `travelling`) runs only on its own event-log route |
 | `mine_event`, `mine_locations`, `mine_materials`, `mine_block`, `pinned_events`, `registered_apps`, `users` | Platform | tracker | Platform schema. `mine_locations`: the nearest location within 250 m (`EVENT_LOG_LOCATION_MAX_METERS`) stamps event logs; `registered_apps`: the cab API key; `users`: the user behind a token |
-| `tracker` | tracker (GPS history) | Platform, read-only: `equipment_id`, `time`, `speed`, `created_at`, `deleted_at` for the cycles report's stops (`FMS-Backend: src/helpers/reports.ts (CYCLE_STOPS_SQL)`) | tracker schema; no primary key, `uuid` unique, soft-deleted; the Platform's query needs `tracker_equipment_id_time_idx` (a tracker migration). `speed` as the cab sent it (km/h) |
+| `tracker` | tracker (GPS history) | Platform, read-only: `equipment_id`, `time`, `speed`, `created_at`, `deleted_at` for the cycles report's stops (`FMS-Backend: src/helpers/reports.ts (CYCLE_STOPS_SQL)`); `equipment_id`, `time`, `coordinates`, `created_at`, `deleted_at` for cycle distances (`FMS-Backend: src/helpers/cycle-distances.ts (CYCLE_DISTANCE_SQL)`), which is the tracker's own `GET /track/linestring` query (`microservice.tracker: src/utils/routes/TrackUtil.ts (LINESTRING_SQL)`) batched over cycles — the two must measure alike, so a change to either query is a change to both | tracker schema; no primary key, `uuid` unique, soft-deleted; the Platform's queries need `tracker_equipment_id_time_idx` (a tracker migration). `speed` as the cab sent it (km/h); `coordinates` a point geometry in SRID 4326 (lon, lat), null when the fix had none — the distance is a geodesic `ST_Length` over it |
 | `geofence_logs` | tracker | — | tracker schema |
 | `hour_meter_readings` | tracker (`ON CONFLICT DO NOTHING` on `(equipment_id, time)`) | — | tracker schema; TimescaleDB hypertable on `time` |
 
@@ -2360,6 +2360,12 @@ Each section ends with the rules particular to its surface; these hold for all o
 ## 10. Changelog
 
 Newest first. Every change to this file adds an entry here and bumps the marker under the title (§0).
+
+### 1.1.0 — 2026-11-11
+
+**Added: the Platform reads `tracker.coordinates`.** `POST /api/v2/cycles/distances` measures how far a truck drove over each finished cycle from the `tracker` table, with the tracker's own `LINESTRING_SQL` batched over cycles, and caches each answer for three days (`cycle-distance:<cycleId>`, Platform-only). The dashboard used to ask the tracker's `GET /track/linestring` once per cycle for this. §7's `tracker` row lists the columns and the rule: the two queries must keep measuring alike, and `coordinates` must stay a point in SRID 4326.
+
+Affects: microservice.tracker (owner of the table and of the original query), the Platform (reader).
 
 ### 1.0.1 — 2026-11-05
 
