@@ -1,6 +1,6 @@
 # Fleet wire contract
 
-<!-- fleet-contract:version 1.1.0 -->
+<!-- fleet-contract:version 1.2.0 -->
 
 The single source of truth for every wire surface between the five services that carry a vehicle's data from the cab to the Platform: GPS fixes, hour-meter readings, geofence crossings, event logs, sessions, cycles, master data and the commands that flow back.
 
@@ -50,6 +50,7 @@ The contract's version is not a service version: it travels with this file, and 
 | In-cab UI (gridlock) ⇄ geofencer | `geofencer/docs/CONTRACT-gridlock.md` |
 | wt61-driver → microservice.hm | `FMS-Backend/docs/ecosystem/integrations/wt61-driver-to-hm.md` |
 | Dashboard (FMS-frontend) ⇄ Platform | `FMS-Backend/docs/ecosystem/integrations/web-platform.md` |
+| Box maintenance: map-editor ⇄ update-daemon on the box (its actions, replies, status report, jobs and polling) | `update-daemon/docs/CONTRACT-map-editor.md`. This file covers only the hops it rides: `device:command` (§5) and `unit:command` / `unit:reply` (§7) |
 
 API specs move with this file: a shape change on the tracker also updates `microservice.tracker/src/docs/openapi.ts`, and one on geofencer updates `geofencer/docs/geofencer-docs.json`.
 
@@ -76,6 +77,8 @@ API specs move with this file: a shape change on the tracker also updates `micro
 
 There are **no** direct edges between microservice.gps or microservice.hm and the server: their data reaches the tracker and the Platform only through geofencer. Requests from off the vehicle to geofencer go as commands over the tracker's socket (§5), never as HTTP to the unit, apart from the API-key routes listed in §6.
 
+**map-editor** is not one of the five, and it appears here for one thing only. It publishes `unit:command` on the server bus, and only for `device:command`: box maintenance, which geofencer hands to **update-daemon** on the same box (§5 "Device maintenance — `device:command`", §7). Both map-editor and update-daemon sit outside this contract; what they say to each other is in update-daemon's contract (§0 "What is not here").
+
 ## 2. Conventions
 
 These hold across the five services unless a section says otherwise. `docs/ecosystem/glossary/naming-rules.md` is normative for **new** surfaces; existing surfaces keep the shapes documented here.
@@ -84,7 +87,7 @@ These hold across the five services unless a section says otherwise. `docs/ecosy
 
 | Redis | Where | Used for |
 |---|---|---|
-| **Cab Redis** | on the vehicle; geofencer's `REDIS_URL`, gps and hm's `REDIS_URL` | §3 and §4 pub/sub, GPS status keys, `hour-meter:state` |
+| **Cab Redis** | on the vehicle; geofencer's `REDIS_URL`, gps and hm's `REDIS_URL` | §3 and §4 pub/sub, GPS status keys, `hour-meter:state`; geofencer ⇄ update-daemon on `update:command` / `update:reply` (§5 "Device maintenance") |
 | **Server Redis** | shared by the tracker and the Platform; geofencer's `REDIS_SVR_URL` | §7's bus and keyspace; geofencer only reads it (§5's excavator beacon) |
 
 A message on the cab Redis carries no vehicle identity: the vehicle is the Redis it lands on. geofencer attaches the identity before anything leaves the cab.
@@ -1532,7 +1535,7 @@ geofencer's `socket:connect`/`socket:disconnect` (local events) also gate the re
 
 #### Unit commands over the socket — `unit:command` relay (Platform → tracker → geofencer, with ack)
 
-The Platform cannot reach a cab's socket, because cabs connect to the tracker. It publishes a command on the bus and waits for exactly one reply (`microservice.tracker: src/helpers/unit-command.ts (relayUnitCommand)`). The bus message shapes are owned by §7.
+The Platform cannot reach a cab's socket, because cabs connect to the tracker. It publishes a command on the bus and waits for exactly one reply (`microservice.tracker: src/helpers/unit-command.ts (relayUnitCommand)`). map-editor publishes on the same channel, for `device:command` only (§ Device maintenance below). The bus message shapes are owned by §7.
 
 ```jsonc
 // bus unit:command (Platform → tracker)
@@ -1542,7 +1545,8 @@ The Platform cannot reach a cab's socket, because cabs connect to the tracker. I
 { "request_id": "01J…", "status": "ack", "outcome": { "status": 200, "data": { … } } }
 ```
 
-- **The allowlist.** `event` is checked against `UNIT_COMMAND_EVENTS`: `session:end`, `session:override`, `auto-cycle:toggle`, `auto-cycle:get`, `master-data:pull`. `timeout_ms` must be 500–30 000. A new command is added to the allowlist, to a geofencer socket handler, to the Platform sender and to this contract in one change.
+- **The allowlist.** `event` is checked against `UNIT_COMMAND_EVENTS`: `session:end`, `session:override`, `auto-cycle:toggle`, `auto-cycle:get`, `master-data:pull`, `device:command`. `timeout_ms` must be 500–30 000. A new command is added to the allowlist, to a geofencer socket handler, to the Platform sender and to this contract in one change.
+- **One generic event.** Every event above is one command, except `device:command`. It is the single generic relay for update-daemon: its payload is the daemon's command, so a new daemon action changes update-daemon, its contract and map-editor, but not the allowlist or the geofencer handler. This is a deliberate exception to "one event per command", and the only one (Compatibility rule 7).
 - **Delivery.** The worker that holds `equipment:{uuid}.socket_id` emits `event` with `payload` **as is**, plus an ack callback.
 - **The cab's ack** is always `{ "status": <number>, "data": … }` or `{ "status": <number>, "errors": [{ "msg": "…" }] }`. An ack without a numeric `status` is reported as `outcome {status: 502, errors: [{msg: "the cab answered without a status"}]}`.
 - **`unit:reply.status`:**
@@ -1641,6 +1645,55 @@ This is the Platform asking a cab to pull master data **now** rather than at its
 - **After a location changes.** A few seconds after a location is created, changed or deleted on the Platform (a burst counts as one change), the Platform sends every unit `{ "equipment_uuid", "datasets": ["locations", "geofence-tuning"] }`. Storing `locations` takes effect at once:
   - the `locations:*` geo members and the SQLite `Location` rows the Platform no longer lists are removed, never on an empty reply;
   - the auto-cycle driver drops its cached sites (local event `master-data:stored`).
+
+#### Device maintenance — `device:command` (tracker → geofencer, with ack; geofencer ≥ 0.4.58)
+
+This is map-editor asking a box for its maintenance status, or to update, install or restart, through **update-daemon**. update-daemon is a root daemon on the box, outside the five services, that does what the application stack cannot do to itself. The event is the single generic relay for update-daemon (§ Unit commands over the socket, "One generic event"). **Handler:** `geofencer: src/handlers/DeviceCommandSocketHandler.ts`; the request/reply client is `src/modules/device-commands.ts`, and the ack mapping is `src/helpers/device-command.ts (deviceOutcome)`.
+
+**The payload is the daemon's command.** Its actions and fields, the daemon's reply, the status report and the job snapshot are owned by `update-daemon/docs/CONTRACT-map-editor.md` (§4–§6), not by this file. Only `equipment_uuid` and `action` are read on the way.
+
+```jsonc
+// bus unit:command (map-editor → tracker); request_id is a UUID from map-editor (§7)
+{ "request_id": "3f2b8c1e-…", "equipment_uuid": "6f0e2c1a-…", "event": "device:command",
+  "payload": { "equipment_uuid": "6f0e2c1a-…", "action": "restart", "targets": ["stack"] }, "timeout_ms": 25000 }
+// tracker → cab: the payload as is
+"device:command" { "equipment_uuid": "6f0e2c1a-…", "action": "restart", "targets": ["stack"] }
+// cab → update-daemon, cab Redis channel update:command: the payload plus geofencer's own requestId
+{ "equipment_uuid": "6f0e2c1a-…", "action": "restart", "targets": ["stack"], "requestId": "9d4e…" }
+// update-daemon → cab, cab Redis channel update:reply: exactly one per command
+{ "requestId": "9d4e…", "status": "accepted" }
+// cab → tracker, the ack
+{ "status": 200, "data": { "requestId": "9d4e…", "status": "accepted" } }
+{ "status": 409, "errors": [{ "msg": "busy: job 7a1c… is running" }] }
+{ "status": 503, "errors": [{ "msg": "update-daemon is not listening" }] }
+```
+
+**What the cab does, in this order** (steps 1–4 publish nothing):
+
+1. A payload that is not an object → 400.
+2. Its Redis is not ready → 503. A publish would wait in node-redis' queue and reach the daemon as a stale command after the reconnect.
+3. The payload names another unit or none, or the cab has no identity → 421.
+4. No string `action` → 400. geofencer checks nothing else; the daemon validates the rest.
+5. It publishes `{ ...payload, requestId }` on `update:command`. The `requestId` is geofencer's own and replaces any the payload carried. It then waits up to `DEVICE_COMMAND_TIMEOUT_MS` (20 000 ms) for the `update:reply` carrying that `requestId`, and maps it:
+
+| Status | When | Body |
+| --- | --- | --- |
+| 200 | the daemon replied `accepted` (a job started; `data.requestId` is the job's id) or `ok` (the answer is in the reply) | `data`: the daemon's reply, verbatim |
+| 400 | step 1 or 4 failed, or the daemon replied `invalid` | `errors[0].msg`: geofencer's reason, or the daemon's `message` |
+| 409 | the daemon replied `rejected`: a job is already running | `errors[0].msg`: the daemon's `message`, `busy: job <requestId> is running` |
+| 421 | step 3 failed | as every geofencer handler |
+| 500 | geofencer threw | |
+| 502 | the daemon replied with a `status` geofencer does not know | |
+| 503 | the cab's Redis is down, or the publish reached no subscriber (update-daemon is not running or not subscribed) | `update-daemon is not listening` |
+| 504 | no `update:reply` within 20 s | `update-daemon did not answer` |
+
+- **The channel is fixed.** geofencer publishes only on `update:command` and listens only on `update:reply` (`geofencer: src/constants/index.ts (UPDATE_COMMAND_CHANNEL, UPDATE_REPLY_CHANNEL)`). Nothing in the payload chooses a channel, so this event cannot reach any other channel on the cab's Redis.
+- **Replies stay under 512 KiB.** The ack carries the daemon's reply verbatim, and socket.io (engine.io's default `maxHttpBufferSize`, 1 MB) drops the cab's **whole socket** on a larger message. update-daemon therefore caps every reply at 512 KiB, dropping a report's logs first (`update-daemon: src/status.rs (MAX_REPLY_BYTES)`; its contract §2).
+- **Long actions answer at once.** The relay carries one answer within 30 s. An update, an install or a restart therefore answers `accepted` and runs in the background, and map-editor polls it with the daemon's `status` action. Nothing is pushed back: the tracker republishes nothing a cab emits apart from `equipment:connection`.
+- **Nothing is queued.** Both hops are pub/sub. An offline cab is `no_socket`; a cab whose daemon is not subscribed is 503.
+- **The path runs through the stack it manages.** geofencer and the cab Redis are containers of the box's stack, so a stack restart or a software update cuts the path until geofencer reconnects, roughly 10–60 s of `no_socket` or 503. A box whose stack is down cannot be reached this way at all. map-editor's SSH `obu-remote` path is the fallback, which is why that path stays outside guardrail 17 (`FMS-Backend: docs/BACKLOG.md`).
+- **Older units.** A cab older than 0.4.58 has no handler, so the relay answers `timeout`. An update-daemon that does not know an action answers `invalid`, which the cab acks as 400. Release order: update-daemon, geofencer, microservice.tracker, map-editor.
+- **The Platform sends nothing on this event.**
 
 #### A new mine plan — `new:mine-plan` (tracker → geofencer, no ack; geofencer ≥ 0.4.32)
 
@@ -1765,7 +1818,9 @@ These key names and fields are a contract: renaming one breaks every truck silen
 | Current-event cab grace | `CURRENT_EVENT_CAB_GRACE_MS` (both services, must match) | 2 min |
 | Current-operator TTL | tracker `REDIS_EX` | 6 h |
 | Socket state TTL | tracker `REDIS_EXPIRE` | 13 h (`equipment:{uuid}.socket_id`, `socket:{uuid}`) |
-| Unit command timeout | tracker `unitCommandSchema.timeout_ms` | 500–30 000 ms (the Platform sends 25 s for `master-data:pull`) |
+| Unit command timeout | tracker `unitCommandSchema.timeout_ms` | 500–30 000 ms (the Platform sends 25 s for `master-data:pull`; map-editor 25 s for `device:command`) |
+| Device command wait on the cab | geofencer `DEVICE_COMMAND_TIMEOUT_MS` | 20 s for update-daemon's `update:reply`, then 504 |
+| Device command timeout | map-editor `lib/devices/command.ts` | `timeout_ms` 25 000 for every action, so the cab's 504 arrives before the relay's `timeout`; map-editor waits 27 s for `unit:reply` |
 | Excavator beacon max age | tracker `EXCAVATOR_PUBLISH_MAX_AGE_MS` | 2 min |
 | Excavator freshness on the cab | geofencer `EXCAVATOR_POSITION_FRESH_MS` | 2 min |
 | Excavator seed | geofencer `EXCAVATOR_SEED_RADIUS_M`, `COUNT`, `EXCAVATOR_REMOTE_TIMEOUT_MS` | 500 m, 20 results, 3 s per command |
@@ -1786,7 +1841,7 @@ These key names and fields are a contract: renaming one breaks every truck silen
 4. **The tracker must stay fast and non-5xx on `POST /api/track`.** Any error or a response slower than geofencer's 45 s realtime timeout degrades every point to delayed and silently thins the live map. After any tracker deploy, verify with the Swagger docs (`/api/docs`) and one realtime POST.
 5. **A drain marks rows only against an acknowledgement.** That means a 2xx, no `errors` array, a non-null `data`, and, where the reply is per element, the element's own verdict. The tracker must keep answering per element where it does today, and must not turn a rejection into a 2xx without an `errors` array.
 6. **The unit is always the authenticated `x-equipment-uuid`.** No endpoint may take the unit from the body or the path. Path ids on `GET /api/session/:id` and `GET`/`PATCH /api/event-logs/current/:id` are ignored and kept only for compatibility.
-7. **Socket commands are targeted, acked and addressed.** Every server → cab command goes through `unit:command` with an ack, never as a broadcast. The cab answers `{status, data | errors}`, refuses another unit's payload with 421, and treats `new:mine-plan` (and any future prompt event) as a hint, never as the only delivery path. Adding a command means changing `UNIT_COMMAND_EVENTS`, the geofencer handler, the Platform sender and this section together.
+7. **Socket commands are targeted, acked and addressed.** Every server → cab command goes through `unit:command` with an ack, never as a broadcast. The cab answers `{status, data | errors}`, refuses another unit's payload with 421, and treats `new:mine-plan` (and any future prompt event) as a hint, never as the only delivery path. Adding a command means changing `UNIT_COMMAND_EVENTS`, the geofencer handler, the Platform sender and this section together. **The one exception is `device:command`**, the generic relay to update-daemon: it is one allowlist entry and one handler for every daemon action, it is sent by map-editor rather than the Platform, and a new daemon action changes update-daemon, its contract and map-editor only. Its handler forwards only to the fixed channel `update:command`. No other event may be generic.
 8. **The tracker Redis keys trucks read are contract.** That covers `excavator:update` and its payload, `location:excavator`, `state:{uuid}.last_updated_ms`, and the `equipment:{uuid}` identity fields. They change only together with geofencer's `ExcavatorPositionHandler`.
 9. **Schema changes the tracker declares** (Platform-owned `mine_cycle` columns and the like) ship in the order Platform migration → tracker → cabs. An older cab that omits new optional fields must keep working: a create stores null, and a PATCH leaves the stored values alone.
 
@@ -2177,6 +2232,8 @@ The Platform's own GPS tables `tracks` and `track_fixes` receive nothing from ca
 
 The tracker publishes on its `redisSubClient` (a publish-only connection, despite the name) and subscribes on a dedicated `redisSubscriberClient`, wired in `microservice.tracker: src/app.ts (MainApp.initRedis)`; its subscribers are `src/handlers/EquipmentHandler.ts`, `MinePlanHandler.ts` and `UnitCommandHandler.ts`. The Platform publishes on `redisPubClient` and subscribes on `redisSubClient`, both on `REDIS_BUS_URL`; its subscribers are `FMS-Backend: src/handlers/TrackHandler.ts`, `HaulProgressHandler.ts`, `TrackFixHandler.ts`, `RedisSubHandler.ts`, `src/helpers/unit-command.ts (UnitCommandClient)` and `src/helpers/unit-auto-cycle.ts (startAutoCycleQueue)`. Every worker of each service subscribes, so every worker hears every message.
 
+map-editor, outside the five services, is a client of the same bus (`map-editor: lib/live/bus.ts`, on its `FMS_REDIS_BUS_URL`). It publishes on it only `unit:command`, for `device:command`, and it subscribes to `unit:reply` for the answers (`map-editor: lib/devices/command.ts (DeviceCommandClient)`).
+
 | Channel | Publisher | Subscribers | Payload |
 |---|---|---|---|
 | `track:update` | tracker, for every point — realtime or replayed in a batch — that wins the `state:{uuid}` compare-and-set (`microservice.tracker: src/utils/routes/TrackUtil.ts (TrackUtil.updateState)`) | Platform `TrackHandler` (emits `equipment-move` to its own worker's clients) and `HaulProgressHandler` | below |
@@ -2188,8 +2245,8 @@ The tracker publishes on its `redisSubClient` (a publish-only connection, despit
 | `replace-event-log` | tracker, on the same landed cab writes | Platform `RedisSubHandler` → `replace-event-log` | `{ …event fields, equipment_id }`; frozen legacy |
 | `new-operator` | tracker, `POST /api/operators/auth` from a cab (§5) | Platform `RedisSubHandler` → `new-operator` | `{ id, name, username, oracle_number, login_at }` |
 | `equipment:connection` | tracker, a cab socket opening or closing (`microservice.tracker: src/handlers/SocketHandler.ts`) | Platform `startAutoCycleQueue` (on `connected: true` sends the unit's waiting auto-cycle switch, §5) | `{ equipment_uuid, socket_id, connected, at, worker, reason? }`; `at` ISO-8601; `reason` only when `connected` is false |
-| `unit:command` | Platform (`FMS-Backend: src/helpers/unit-command.ts (UnitCommandClient.send)`) | every tracker worker (`UnitCommandHandler`) | below; each event's payload in §5 |
-| `unit:reply` | tracker (`microservice.tracker: src/helpers/unit-command.ts (relayUnitCommand)`), exactly one per command | every Platform worker; the sender claims it by `request_id` | below |
+| `unit:command` | Platform (`FMS-Backend: src/helpers/unit-command.ts (UnitCommandClient.send)`); map-editor (`map-editor: lib/devices/command.ts`), for `device:command` only | every tracker worker (`UnitCommandHandler`) | below; each event's payload in §5 |
+| `unit:reply` | tracker (`microservice.tracker: src/helpers/unit-command.ts (relayUnitCommand)`), exactly one per command | every Platform worker and map-editor; the sender claims it by `request_id`, and every other subscriber ignores it | below |
 | `mine-plan:create` | Platform after writing a plan: the scheduler's clone before each shift and `POST /api/mine-plans` (`FMS-Backend: src/helpers/mine-plan-publish.ts (publishNewMinePlans)`) | tracker `MinePlanHandler` → socket `new:mine-plan` to that unit only (§5) | `{ equipment_id, equipment_uuid \| null, equipment_hull_number \| null, equipment_type, plan }`; addressed by `equipment_type` (`Excavator` → `exca_id`, `Truck` → `truck_id`, else `equipment_id`); the tracker looks a null uuid up |
 | `equipment:ready` | Platform: return to service (`FMS-Backend: src/helpers/return-to-service.ts (ReturnToServiceService)`) and the v1 equipment update to `Ready` (`src/routes/equipments.ts`) | tracker `EquipmentHandler` → socket `equipment:ready` to the unit, or to every cab when no socket id is on record | the whole `mine_equipments` row; must carry `uuid`. geofencer has no listener for the socket event |
 | `haul:fix` | Platform track-ingest routes (§6) | Platform `HaulProgressHandler`, `TrackFixHandler` | Platform-internal; it only travels on the shared bus |
@@ -2241,9 +2298,9 @@ The tracker publishes on its `redisSubClient` (a publish-only connection, despit
 #### `unit:command` and `unit:reply`
 
 ```jsonc
-// unit:command — Platform → every tracker worker
+// unit:command — Platform (or map-editor, for device:command) → every tracker worker
 {
-  "request_id": "01JC9Q3V7Y6M0R6Z8K2B4D5E6F",  // a ULID
+  "request_id": "01JC9Q3V7Y6M0R6Z8K2B4D5E6F",  // a ULID from the Platform; a UUID from map-editor
   "equipment_uuid": "0b6f2c8e-…",
   "event": "master-data:pull",
   "payload": { "equipment_uuid": "0b6f2c8e-…", "datasets": ["locations", "geofence-tuning"] },
@@ -2259,16 +2316,17 @@ The tracker publishes on its `redisSubClient` (a publish-only connection, despit
 
 | Field | Type | Presence | Notes |
 |---|---|---|---|
-| `request_id` | string (ULID) | always, both | the correlation key |
+| `request_id` | string | always, both | the correlation key. A ULID from the Platform, a UUID (v4) from map-editor; the tracker requires only a non-empty string and echoes it |
 | `equipment_uuid` | string | always (command) | the unit; the tracker finds its socket at `equipment:{uuid}.socket_id` |
-| `event` | string | always (command) | must be in the tracker's allowlist `UNIT_COMMAND_EVENTS`: `session:end`, `session:override`, `auto-cycle:toggle`, `auto-cycle:get`, `master-data:pull` |
-| `payload` | object | always (command) | emitted to the cab as is; shapes in §5 |
-| `timeout_ms` | integer 500–30000 | always (command) | how long the tracker waits for the cab's ack; the Platform sends 5000, 25000 for `master-data:pull` |
+| `event` | string | always (command) | must be in the tracker's allowlist `UNIT_COMMAND_EVENTS`: `session:end`, `session:override`, `auto-cycle:toggle`, `auto-cycle:get`, `master-data:pull`, `device:command` |
+| `payload` | object | always (command) | emitted to the cab as is; shapes in §5 (for `device:command`, in update-daemon's contract) |
+| `timeout_ms` | integer 500–30000 | always (command) | how long the tracker waits for the cab's ack; the Platform sends 5000, 25000 for `master-data:pull`; map-editor sends 25000 for `device:command` |
 | `status` | `ack` \| `timeout` \| `no_socket` | always (reply) | `ack`: the cab answered; `timeout`: the socket holder got no ack in time; `no_socket`: no worker holds a socket for the unit |
 | `outcome` | `{ status: number, data?, errors?: [{ msg }] }` | with `ack` | the cab's answer; an ack without a numeric `status` becomes `{ status: 502 }` |
 
 - The tracker checks the command with zod (`microservice.tracker: src/helpers/unit-command.ts (unitCommandSchema)`) and ignores anything else without replying; it never retries. The worker holding the socket emits and replies; `no_socket` comes from the worker `socket:{uuid}.worker` names, or worker `0` when there is none.
-- The Platform resolves `unreachable` when no reply arrives within `timeout_ms` + 2000 ms (`UNIT_REPLY_MARGIN_MS`) — the tracker or the bus is down, or the command was ignored.
+- The Platform resolves `unreachable` when no reply arrives within `timeout_ms` + 2000 ms (`UNIT_REPLY_MARGIN_MS`) — the tracker or the bus is down, or the command was ignored. map-editor waits the same `timeout_ms` + 2000 ms.
+- **Every subscriber hears every reply.** A sender keeps the `request_id`s it published and ignores any other reply, so the Platform and map-editor never take each other's answers.
 
 #### `current-event:update` and the shared compare-and-set
 
@@ -2341,7 +2399,7 @@ Each section ends with the rules particular to its surface; these hold for all o
 4. **Ingest stays fast.** A slow or failing answer is not an error to the cab but a reason to buffer and retry, which piles up. §5 gives the tracker's budget.
 5. **Pub/sub is not storage.** The cab bus (§3, §4) and the server bus (§7) drop messages for anyone not listening. State a restart must not lose also lives in a key or a table, and consumers seed from it.
 6. **Wire time is ISO-8601 with a zone.** Locale strings, local times and epoch numbers are for humans and logs, unless a section pins a numeric field with its unit in the name (`at_ms`).
-7. **A request from off the vehicle reaches a cab only over the tracker's socket** (§5). A new Platform → cab command is the tracker's `UNIT_COMMAND_EVENTS` allowlist entry, a geofencer handler, a Platform sender and this contract, in one change.
+7. **A request from off the vehicle reaches a cab only over the tracker's socket** (§5). A new Platform → cab command is the tracker's `UNIT_COMMAND_EVENTS` allowlist entry, a geofencer handler, a Platform sender and this contract, in one change. The one exception is `device:command`: a single generic relay that map-editor sends and geofencer forwards to update-daemon on the fixed channel `update:command`, whose actions are update-daemon's contract and need no change here (§5 "Device maintenance"). It does not license a second generic event.
 8. **A new surface between these five services gets its section here in the same change** that adds it, with a minor bump.
 9. **Shared tables change in both server repos.** A column on a table both the Platform and the tracker map (cycles, event logs, sessions, …) lands in the Platform's model and migration and in the tracker's model together, in the order Platform migration → tracker → cabs (§7).
 
@@ -2360,6 +2418,18 @@ Each section ends with the rules particular to its surface; these hold for all o
 ## 10. Changelog
 
 Newest first. Every change to this file adds an entry here and bumps the marker under the title (§0).
+
+### 1.2.0 — 2026-11-12
+
+**Added: `device:command`, box maintenance through update-daemon.** map-editor publishes `unit:command` with the new allowlisted event `device:command`, and the tracker relays it like any other command. geofencer (≥ 0.4.58) publishes the payload with its own `requestId` on the fixed cab-Redis channel `update:command`, waits up to 20 s for update-daemon's `update:reply`, and acks: 200 with the daemon's reply for `accepted` or `ok`, otherwise 400, 409, 421, 500, 502, 503 or 504. It is the single generic relay for update-daemon and a deliberate exception to "one event per command". The payload is the daemon's command, owned by `update-daemon/docs/CONTRACT-map-editor.md`, so a new daemon action changes no tracker or geofencer code. update-daemon caps its replies at 512 KiB, because socket.io drops the cab's whole socket above 1 MB.
+
+- §0 "What is not here" points at update-daemon's contract.
+- §1 names map-editor and update-daemon; §2 lists the two channels on the cab Redis.
+- §5: the allowlist entry and the generic-relay note, the new subsection "Device maintenance — `device:command`", two operational parameters (`DEVICE_COMMAND_TIMEOUT_MS` 20 s; map-editor's `timeout_ms` 25 000), and the exception in compatibility rule 7.
+- §7: map-editor publishes `unit:command` and subscribes to `unit:reply`; `request_id` is a ULID from the Platform and a UUID from map-editor; a sender ignores replies it did not ask for.
+- §8 rule 7 states the exception.
+
+Affects: microservice.tracker (the allowlist entry), geofencer (the handler, 0.4.58), and two repos that hold no mirror: map-editor (the publisher) and update-daemon (behind the relay). The Platform sends nothing new. microservice.hm and microservice.gps: mirror only. Release order: update-daemon, geofencer, microservice.tracker, map-editor.
 
 ### 1.1.0 — 2026-11-11
 
