@@ -1,6 +1,6 @@
 # Fleet wire contract
 
-<!-- fleet-contract:version 1.4.0 -->
+<!-- fleet-contract:version 1.4.2 -->
 
 The single source of truth for every wire surface between the five services that carry a vehicle's data from the cab to the Platform: GPS fixes, hour-meter readings, geofence crossings, event logs, sessions, cycles, master data and the commands that flow back.
 
@@ -2337,13 +2337,14 @@ The keyspace the two share sits on the Platform's `REDIS_URL` client, not on its
 - **Schema ownership.** The Platform's migrations (sequelize-cli, ledger `SequelizeMeta`) own the Platform tables. The tracker's migrations (`deno task db:migrate`, ledger `tracker_migrations`, `microservice.tracker: src/db/migrator.ts`) create only the tracker-owned tables and check that the Platform tables they model exist; where `SequelizeMeta` exists they refuse to create them (`microservice.tracker: src/db/migrations/20261021000400-platform-tables.ts`).
 - **Models must agree.** Each repo models the shared tables itself; a column one model lacks is silently dropped from that repo's writes. A change to a shared table changes both models in the same change.
 - **Hooks do not cross.** A row one service writes fires no hook in the other: the Platform learns of the tracker's writes only through the bus.
+- **Capture triggers do.** The Platform's outbound webhooks own one database trigger, `webhook_capture`, on `mine_cycle`, `event_logs` and `prestartresults` (`FMS-Backend: src/helpers/webhooks/capture.ts`, migration `20261116090000-webhooks.js`). It fires for every writer, the tracker included, and records each committed change in the Platform table `webhook_events`, in the writer's own transaction, only while an enabled webhook wants that change. It can never fail a write: any error inside it becomes a `WARNING` and the change is skipped. It runs as its owner (`SECURITY DEFINER`), so the tracker's database user needs no grant. A tracker write is unchanged; it costs one indexed lookup of `webhooks` per row.
 
 > ⚠️ DEFECT (ECO-09): with `DB_ALTER=true` the tracker's cluster primary still runs `sequelize.sync({ alter, force: DB_FORCE })` against the shared database (`microservice.tracker: src/app.ts (MainApp.initDB)`) — a second, uncoordinated schema writer on Platform tables, with a drop-all switch behind it. The ownership also blurs the other way: a Platform migration alters the tracker-owned `geofence_logs` (`FMS-Backend: src/db/migrations/20260829120000-geofence-logs-uuid.js`). Target: no `sync()` in the tracker, each table migrated by its owner only.
 
 | Table | Written by | Read by | Notes |
 |---|---|---|---|
-| `mine_cycle` | tracker (`POST` / `PATCH /api/cycles` from cabs, `Cycle` model); Platform (its own routes and jobs) | both | Platform schema. Tracker writes publish `cycle:*` |
-| `event_logs` | tracker (`POST /api/event-logs`, `PATCH /api/event-logs/:id`, the `cycle_uuid` → `cycle_id` backfill); Platform (dispatcher edits, session end, shift-start sweep, return to service) | both | Platform schema. Tracker writes publish `event-log:*` |
+| `mine_cycle` | tracker (`POST` / `PATCH /api/cycles` from cabs, `Cycle` model); Platform (its own routes and jobs) | both | Platform schema. Tracker writes publish `cycle:*`. Every write passes the Platform's `webhook_capture` trigger (above) |
+| `event_logs` | tracker (`POST /api/event-logs`, `PATCH /api/event-logs/:id`, the `cycle_uuid` → `cycle_id` backfill); Platform (dispatcher edits, session end, shift-start sweep, return to service) | both | Platform schema. Tracker writes publish `event-log:*`. Every write passes the Platform's `webhook_capture` trigger (above) |
 | `sessions` | tracker (`POST /api/session`, `POST /api/session/late`, the plan re-sync on each event log, the current-event follow); Platform (login, shift-change close, session end and override, prestart hour meter) | both | Platform schema. Tracker writes publish `session:*`, which nobody hears (see the channels) |
 | `engine_starts` | tracker (`EngineStart.bulkCreate`, `ON CONFLICT DO NOTHING` on `reading_uuid`) | Platform (`GET /api/v2/engine-start`) | Platform schema (`FMS-Backend: src/db/migrations/20261013090000-engine-starts.js`); the two models are field-for-field the same |
 | `mine_equipments` | Platform; tracker sets `status = 'Breakdown'` on a breakdown event log (`microservice.tracker: src/utils/routes/EventLogUtil.ts`), a static update that fires no hooks | both | Platform schema |
@@ -2355,7 +2356,7 @@ The keyspace the two share sits on the Platform's `REDIS_URL` client, not on its
 
 The Platform's own GPS tables `tracks` and `track_fixes` receive nothing from cabs, which post GPS only to the tracker.
 
-> ⚠️ DEFECT: the Platform reads the same speed in two units. `TrackHandler` multiplies `track:update.speed` by 3.6 — it takes it for m/s — while `helpers/reports.ts` treats `tracker.speed` as km/h (`STOP_SPEED_KMH`). The tracker stores and publishes the cab's value unconverted (km/h, §2), so the live map's speed is 3.6 times too high. Target: no conversion in `TrackHandler`.
+The Platform reads `speed` in one unit everywhere, km/h as the cab sent it (§2): `TrackHandler` passes `track:update.speed` to the dashboards' `equipment-move` unconverted, and `helpers/reports.ts` judges stops on `tracker.speed` in km/h (`STOP_SPEED_KMH`).
 
 ### Shared Redis — channels
 
@@ -2441,7 +2442,7 @@ map-editor, outside the five services, is a client of the same bus (`map-editor:
 | `time` | string | always | the cab's string, not normalised. The Platform parses it with `trackerTimeFormats` (`FMS-Backend: src/consts/index.ts`): ISO-8601, `YYYY-MM-DD HH:mm:ss.SSS Z` or `YYYY-MM-DD HH:mm:ss Z`. An offset is required: without one it is read in the Platform server's local time. `HaulProgressHandler` drops a point whose `time` does not parse; `TrackHandler` then emits `time_diff: null` |
 | `last_updated` | string | always | the previous `state:{uuid}.last_updated`, or this point's `time` on the unit's first write |
 | `alt` | number | when the cab sent it | metres |
-| `speed` | number | when the cab sent it | km/h, unconverted; see the speed defect above |
+| `speed` | number | when the cab sent it | km/h, unconverted; the Platform's `equipment-move` passes it on as it is |
 
 > ⚠️ DEFECT (ECO-04): the payload carries `alt`, but `TrackHandler` emits `altitude: parsed.altitude`, always undefined; `FMS-Backend: src/helpers/live-tracks.ts` likewise reads `state:{uuid}.altitude`, which the hash stores as `alt`. Target: the publisher maps `alt` → `altitude`, or every reader reads `alt`.
 
@@ -2568,6 +2569,18 @@ Each section ends with the rules particular to its surface; these hold for all o
 ## 10. Changelog
 
 Newest first. Every change to this file adds an entry here and bumps the marker under the title (§0).
+
+### 1.4.2 — 2026-11-16
+
+**Documented: the Platform's webhook capture trigger on shared tables.** The Platform's outbound webhooks add `webhook_capture`, an AFTER INSERT OR UPDATE trigger on `mine_cycle` and `event_logs` (and the Platform-only `prestartresults`). It records each committed change in the Platform table `webhook_events` for the Platform's dispatcher to send. It never fails a write, and needs no grant for the tracker's database user. §7 "Shared Postgres" says so, and so do the two tables' rows. No wire change between the five services: the tracker writes as before.
+
+Affects: the Platform (the trigger, the dispatcher, `/api/v2/webhooks`). microservice.tracker: its writes to the two tables now pass the trigger; no code change. geofencer, microservice.hm and microservice.gps: mirror only. Release order: the Platform migration, then anything.
+
+### 1.4.1 — 2026-11-13
+
+**Fixed: the Platform's live speed is km/h.** `TrackHandler` no longer multiplies `track:update.speed` by 3.6, so `equipment-move` carries the cab's km/h unconverted, the unit the reports already used. The §7 speed defect is gone, and the `track:update` payload's `speed` row says so. No wire change between the five services: the tracker's payload is as it was.
+
+Affects: the Platform (`TrackHandler`). geofencer, microservice.tracker, microservice.hm and microservice.gps: mirror only.
 
 ### 1.4.0 — 2026-11-12
 
