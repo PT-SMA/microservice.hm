@@ -1,6 +1,6 @@
 # Fleet wire contract
 
-<!-- fleet-contract:version 1.2.0 -->
+<!-- fleet-contract:version 1.5.0 -->
 
 The single source of truth for every wire surface between the five services that carry a vehicle's data from the cab to the Platform: GPS fixes, hour-meter readings, geofence crossings, event logs, sessions, cycles, master data and the commands that flow back.
 
@@ -47,7 +47,7 @@ The contract's version is not a service version: it travels with this file, and 
 | Surface | Contract |
 |---|---|
 | Haul-road routing (FMS-Backend ⇄ microservice.route-topology ⇄ FMS-frontend) | `FMS-Backend/docs/HAUL_CONTRACT.md` |
-| In-cab UI (gridlock) ⇄ geofencer | `geofencer/docs/CONTRACT-gridlock.md` |
+| In-cab UI (gridlock, both builds) ⇄ geofencer, and the Platform flows that end on the operator's screen | `FMS-Backend/docs/GRIDLOCK_CONTRACT.md` |
 | wt61-driver → microservice.hm | `FMS-Backend/docs/ecosystem/integrations/wt61-driver-to-hm.md` |
 | Dashboard (FMS-frontend) ⇄ Platform | `FMS-Backend/docs/ecosystem/integrations/web-platform.md` |
 | Box maintenance: map-editor ⇄ update-daemon on the box (its actions, replies, status report, jobs and polling) | `update-daemon/docs/CONTRACT-map-editor.md`. This file covers only the hops it rides: `device:command` (§5) and `unit:command` / `unit:reply` (§7) |
@@ -1269,6 +1269,16 @@ The two methods carry different bodies:
 
 When the in-cab UI corrects the running event (`PATCH /api/event-logs` on the cab), the column the replaced event had stamped never happened. geofencer clears it and, when the corrected event is itself a cycle event, re-stamps that event's own column with the same unchanged `start_time` (`CycleHandler.remapCycleTimestamps`, driven by the `cycle_trigger` map in `settings:cycles`). The cycle PATCH body therefore carries the cleared column as an explicit **`null`**. The tracker writes it as null, so the revert lands. `arrived_at_load` is never sent as null: it anchors the cycle's existence and sits outside the unit's `TIMESTAMP_FIELDS`.
 
+#### Estimated phase timestamps — the Platform, after the write
+
+A finished cycle often reaches the server with phase columns the cab never stamped: a skipped step, a delay between two steps, a lap closed by the next arrival, a missed dump, a logout. Within seconds of the cycle finishing, the Platform fills them (`FMS-Backend: src/helpers/cycle-interpolation*.ts`):
+
+- **Which columns.** The ten between `arrived_at_load` and `finish_time`: `start_spotting`, `end_spotting`, `start_loading`, `finish_loading`, `hauling`, `arrived_at_dump`, `start_dump_spotting`, `end_dump_spotting`, `start_dumping`, `finish_dumping`. The anchors and `travelling` are never written.
+- **How.** First from the unit's own event logs (the Platform's cycle ↔ event-log repair). What is left is estimated from similar complete cycles: the same truck and route first, and spread over the real gap, so a real timestamp never moves.
+- **The marker.** `mine_cycle.interpolated_timestamps` (JSONB, Platform-owned, nullable) holds `{ column: epoch ms }` of each estimate. A column is estimated only while its value equals the recorded one: a later real value, from the cab or anyone, simply replaces it.
+- **Not in the tracker's write.** The fill is a separate Platform write after the tracker's, so the tracker's answer still echoes exactly what the cab sent, and the cab's echo hash still matches. The cab never sees the estimates.
+- **A re-sent null is filled again.** When the cab re-pushes a finished cycle (a timed-out PATCH, a retried POST answered with the stored row), the tracker writes its explicit nulls over the estimates, as it writes every field (above). The Platform's next pass estimates them again; the cab's echo of that push is its own row, so it settles.
+
 #### Cycle finish and acknowledgement stamps (geofencer ≥ 0.4.14)
 
 - **A logout finishes the open cycle on every logout code,** including Recharging (`R-D-0152`, a DELAY-typed event). The cab stamps `finish_time` and `travelling` with the logout's `start_time`, releases `current:cycle`, and sends **one** `PATCH /api/cycles/:id`, or a `POST` when the cycle was never pushed.
@@ -1545,7 +1555,7 @@ The Platform cannot reach a cab's socket, because cabs connect to the tracker. I
 { "request_id": "01J…", "status": "ack", "outcome": { "status": 200, "data": { … } } }
 ```
 
-- **The allowlist.** `event` is checked against `UNIT_COMMAND_EVENTS`: `session:end`, `session:override`, `auto-cycle:toggle`, `auto-cycle:get`, `master-data:pull`, `device:command`. `timeout_ms` must be 500–30 000. A new command is added to the allowlist, to a geofencer socket handler, to the Platform sender and to this contract in one change.
+- **The allowlist.** `event` is checked against `UNIT_COMMAND_EVENTS`: `session:end`, `session:override`, `auto-cycle:toggle`, `auto-cycle:get`, `master-data:pull`, `device:command`, `voice-note:new`. `timeout_ms` must be 500–30 000. A new command is added to the allowlist, to a geofencer socket handler, to the Platform sender and to this contract in one change.
 - **One generic event.** Every event above is one command, except `device:command`. It is the single generic relay for update-daemon: its payload is the daemon's command, so a new daemon action changes update-daemon, its contract and map-editor, but not the allowlist or the geofencer handler. This is a deliberate exception to "one event per command", and the only one (Compatibility rule 7).
 - **Delivery.** The worker that holds `equipment:{uuid}.socket_id` emits `event` with `payload` **as is**, plus an ack callback.
 - **The cab's ack** is always `{ "status": <number>, "data": … }` or `{ "status": <number>, "errors": [{ "msg": "…" }] }`. An ack without a numeric `status` is reported as `outcome {status: 502, errors: [{msg: "the cab answered without a status"}]}`.
@@ -1689,11 +1699,103 @@ This is map-editor asking a box for its maintenance status, or to update, instal
 
 - **The channel is fixed.** geofencer publishes only on `update:command` and listens only on `update:reply` (`geofencer: src/constants/index.ts (UPDATE_COMMAND_CHANNEL, UPDATE_REPLY_CHANNEL)`). Nothing in the payload chooses a channel, so this event cannot reach any other channel on the cab's Redis.
 - **Replies stay under 512 KiB.** The ack carries the daemon's reply verbatim, and socket.io (engine.io's default `maxHttpBufferSize`, 1 MB) drops the cab's **whole socket** on a larger message. update-daemon therefore caps every reply at 512 KiB, dropping a report's logs first (`update-daemon: src/status.rs (MAX_REPLY_BYTES)`; its contract §2).
-- **Long actions answer at once.** The relay carries one answer within 30 s. An update, an install or a restart therefore answers `accepted` and runs in the background, and map-editor polls it with the daemon's `status` action. Nothing is pushed back: the tracker republishes nothing a cab emits apart from `equipment:connection`.
+- **Long actions answer at once.** The relay carries one answer within 30 s. An update, an install or a restart therefore answers `accepted` and runs in the background, and map-editor polls it with the daemon's `status` action. Nothing is pushed back: the tracker republishes nothing a cab emits apart from `equipment:connection` and the intercom uplink (§5 "Intercom").
 - **Nothing is queued.** Both hops are pub/sub. An offline cab is `no_socket`; a cab whose daemon is not subscribed is 503.
 - **The path runs through the stack it manages.** geofencer and the cab Redis are containers of the box's stack, so a stack restart or a software update cuts the path until geofencer reconnects, roughly 10–60 s of `no_socket` or 503. A box whose stack is down cannot be reached this way at all. map-editor's SSH `obu-remote` path is the fallback, which is why that path stays outside guardrail 17 (`FMS-Backend: docs/BACKLOG.md`).
 - **Older units.** A cab older than 0.4.58 has no handler, so the relay answers `timeout`. An update-daemon that does not know an action answers `invalid`, which the cab acks as 400. Release order: update-daemon, geofencer, microservice.tracker, map-editor.
 - **The Platform sends nothing on this event.**
+
+#### Voice note — `voice-note:new` (tracker → geofencer, with ack; geofencer ≥ 0.4.59)
+
+A dispatcher recorded a voice note for this unit's operator. The Platform has already stored it, audio included, in its own table `voice_notes` (not shared with the tracker), and this command is **only a notice**: the audio never rides the socket, which drops the cab's whole connection above 1 MB. The cab fetches the audio over HTTP from the Platform (§6 "Voice notes"), and also pulls every note it has not stored on each connect and each 60 s tick, so a missed notice costs at most a minute once the cab is online. **Handler:** `geofencer: src/handlers/VoiceNoteSocketHandler.ts`; the store, download, pull and receipt drain are `src/handlers/VoiceNoteHandler.ts`. What the operator sees is `GRIDLOCK_CONTRACT.md` §5 "Voice notes, end to end".
+
+```jsonc
+// bus unit:command (Platform → tracker)
+{ "request_id": "01J…", "equipment_uuid": "6f0e2c1a-…", "event": "voice-note:new", "timeout_ms": 10000,
+  "payload": { "equipment_uuid": "6f0e2c1a-…", "voice_note": {
+    "id": "vn_01JD2W8K3Q4R5S6T7V8W9X0Y1Z",
+    "equipment_uuid": "6f0e2c1a-…",
+    "sender_name": "Base Control — Rina",
+    "mime_type": "audio/webm",
+    "size_bytes": 182344,
+    "duration_ms": 14200,
+    "sha256": "9f2c…",               // 64 lower-case hex digits of the audio bytes
+    "created_at": "2026-11-12T03:15:00.000Z",
+    "expires_at": "2026-11-12T15:15:00.000Z" } } }
+// cab → tracker, the ack: the note is recorded; the download continues in the background
+{ "status": 200, "data": { "id": "vn_01JD…", "state": "downloading" } }   // or "stored", or "played" for a repeat
+{ "status": 400, "errors": [{ "msg": "voice_note.sha256 must be 64 hex digits" }] }
+{ "status": 421, "errors": [{ "msg": "meant for 6f0e2c1a-…, this unit is 9b1d…" }] }
+```
+
+`voice_note` is the Platform's cab row, the same object `GET /api/apps/voice-notes` lists (§6):
+
+| Field | Type | Presence | Notes |
+|---|---|---|---|
+| `id` | string | always | `vn_` + a ULID, minted by the Platform; the idempotency key everywhere. The cab requires `^[A-Za-z0-9_-]{1,64}$`, because it names a file |
+| `equipment_uuid` | string | always | must equal the payload's, else 400; a pulled row for another unit is skipped |
+| `sender_name` | string \| null | always | the dispatcher's name as the operator should see it |
+| `mime_type` | string | always | one of `audio/webm`, `audio/ogg`, `audio/mp4`, `audio/mpeg`, `audio/wav`, without codec parameters |
+| `size_bytes` | integer | always | 1 – 1 048 576 |
+| `duration_ms` | integer \| null | always | as the dashboard measured it; ≤ 120 000; null when unknown |
+| `sha256` | string | always | of the audio bytes; the cab checks it before storing |
+| `source` | `"voice-note"` \| `"intercom"` | always, since this contract's 1.4.0 | `intercom`: a live transmission this unit missed (§5 "Intercom"); the cab shows it as a missed call. A cab that predates the field ignores it |
+| `created_at`, `expires_at` | ISO string with a time zone | always | a note expires 12 h after it was created (`VOICE_NOTE_TTL_HOURS`). The cab never downloads or shows an expired note: the ack still says `downloading`, and the row is pruned |
+
+**What the cab does, in this order:**
+
+1. A payload that is not an object → 400.
+2. The payload names another unit or none, or the cab has no identity → 421.
+3. `voice_note` missing, or a field above with the wrong type or out of range → 400. Nothing is stored.
+4. It upserts the note's row by `id` (a repeat changes nothing) and answers **200** with the row's state: `downloading` (audio not yet stored), `stored`, or `played`.
+5. In the background it downloads the audio (§6), checks its length against `size_bytes` and its sha256, stores it, tells the in-cab UI (`GRIDLOCK_CONTRACT.md` §4 `voice-note:new`) and reports `delivered_at` (§6).
+6. A throw → 500.
+
+- **Timeout.** The Platform sends `timeout_ms: 10000`. The ack does not wait for the download.
+- **Offline.** An offline cab is `no_socket`. Nothing is queued on the bus: the Platform keeps the note, and the cab's pull on reconnect (§6) delivers it.
+- **The Platform's verdict.** `ack` with 200 → `sent`; `no_socket`, `timeout` or `unreachable` → `queued` ("the cab gets it when it is back online"); `ack` with any other status → `refused`, with the cab's message. In every case the note stays stored and pending until the cab reports it or it expires. `FMS-Backend: src/helpers/voice-notes.ts (voiceNoteOutcome)`.
+- **Older units.** A cab older than 0.4.59 has no handler, so the relay answers `timeout`, and it never pulls: the note expires undelivered. Release order: geofencer, microservice.tracker, the Platform (after its migration), FMS-frontend; the gridlock builds any time after geofencer.
+
+#### Intercom — `intercom:start` / `intercom:frame` / `intercom:end` and `intercom:talk-*` (tracker ⇄ geofencer; geofencer ≥ 0.4.60)
+
+Live push-to-talk between dispatchers on the dashboard and the operator in the cab, like a half-duplex radio. Audio travels as small JSON frames over the sockets that already exist: dashboard → Platform → server bus (§7 `intercom:downlink`) → tracker → cab, and back (§7 `intercom:uplink`). There is no media server. What the dashboard, geofencer and the in-cab UI do with it is `GRIDLOCK_CONTRACT.md` §4 and §5 "Intercom, end to end"; this section owns the tracker ⇄ cab hop. **Handlers:** `microservice.tracker: src/helpers/intercom.ts (IntercomRouter)`, `src/handlers/SocketHandler.ts`; `geofencer: src/handlers/IntercomSocketHandler.ts` (downlink, and the shared `IntercomState`), `src/handlers/SocketHandler.ts` (the UI's uplink).
+
+**Audio** — the same on every hop: G.711 μ-law (`codec: "pcmu"`), 8000 Hz, mono, frames of 100 ms = 800 bytes, base64 in `data` (1068 characters). A frame whose `data` is not padded base64 of at most 1400 characters is dropped by every hop. One transmission lasts at most 60 s (600 frames, `seq` 0–599); later frames are dropped. The reference implementation is `src/modules/intercomCodec.ts`, byte-identical in FMS-Backend, FMS-frontend and both gridlock builds.
+
+**A transmission** has a `tx_id`: `itx_` + a ULID minted by the Platform for a dispatcher's talk (downlink), `itx_` + a UUID minted by the in-cab UI for an operator's (uplink). Any hop may require `^[A-Za-z0-9_-]{8,64}$`.
+
+**Downlink: tracker → cab.**
+
+```jsonc
+// with an ack, 2 s
+"intercom:start" { "equipment_uuid": "6f0e2c1a-…", "tx_id": "itx_01JD…", "from": { "user_id": 12, "name": "Rina" },
+                   "codec": "pcmu", "sample_rate": 8000, "frame_ms": 100, "started_at": "2026-11-12T03:15:00.000Z" }
+// cab → tracker, the ack
+{ "status": 200, "data": { "listening": true } }
+{ "status": 200, "data": { "listening": false, "reason": "no_ui" } }   // or "busy"
+{ "status": 421, "errors": [{ "msg": "meant for 6f0e2c1a-…, this unit is 9b1d…" }] }
+// no ack
+"intercom:frame" { "tx_id": "itx_01JD…", "seq": 0, "data": "//////…" }   // volatile
+"intercom:end"   { "tx_id": "itx_01JD…", "reason": "released" }           // released | time_limit | idle | disconnected
+```
+
+- **The start ack decides delivery**, because a half-open cab socket looks alive to Socket.IO for up to 45 s. `listening: true` means at least one in-cab UI has joined the intercom and the cab is neither receiving another transmission nor transmitting (`busy`). The tracker maps the answer to a `delivery` message on `intercom:uplink` (§7): 200 with `listening: true` → `live`; 200 with `listening: false` → `not_listening`; any other status → `refused`; no ack within 2 s → `timeout`. A 200 without a boolean `listening` counts as `refused`. `not_listening` and `refused` carry the cab's reason (for `refused`, its first error message, at most 200 characters). Only `live` is heard live; the Platform turns every other target into a voice note (above, `source: "intercom"`).
+- **Fan-out.** Every tracker worker hears `intercom:downlink`. Each keeps an in-memory map of the cab sockets it holds by `equipment_uuid` (filled on `equipment:connected`, cleared on disconnect), so a frame never costs a Redis lookup. On `open` it remembers which of the transmission's targets it holds (for 70 s), emits `intercom:start` to each, then relays every `frame` and the `close` to those whose answer is `live` or still pending. A target that answers anything else, or no ack within 2 s, gets no more frames, and a late ack does not bring it back. A target no worker holds gets no `delivery` at all; the Platform's 3 s deadline classes it missed. An `open` whose `from` is not `{ user_id: integer, name: string }` is dropped whole.
+- **Volatile, no ack** for frames and the end, so a slow cab never backs up the stream and nothing is queued for a disconnected one. This and the uplink below are the documented exceptions to Compatibility rule 7.
+
+**Uplink: cab → tracker.**
+
+```jsonc
+"intercom:talk-start" { "tx_id": "itx_9b8f…", "codec": "pcmu", "sample_rate": 8000, "frame_ms": 100, "started_at": "…" }
+"intercom:talk-frame" { "tx_id": "itx_9b8f…", "seq": 0, "data": "…" }
+"intercom:talk-end"   { "tx_id": "itx_9b8f…", "reason": "released" }
+```
+
+- **Identity is the socket's**, not the payload's: the `equipment_uuid` the socket announced with `equipment:connected`. Anything a socket emits before that is dropped. The tracker validates the shape and the limits above and publishes each message on `intercom:uplink` (§7) with that uuid. It answers nothing.
+- **geofencer sends only on a live link** (`socketClient.connected`) and with `volatile`, because socket.io-client otherwise buffers emits made while disconnected and would replay stale audio on reconnect. An operator's talk while the link is down is refused on the cab (`GRIDLOCK_CONTRACT.md` §4 `intercom:error`); it is not stored.
+- **Who hears it:** every dashboard that has joined the intercom; the Platform also records it (§7). There is no voice-note fallback towards dispatchers: the dashboard lists recent transmissions with replay.
+
+**Older units.** A cab older than 0.4.60 has no handler: `intercom:start` gets no ack, the delivery is `timeout`, and the target gets the voice note. Release order: the Platform migration, microservice.tracker, geofencer, the Platform, FMS-frontend; the gridlock builds after geofencer.
 
 #### A new mine plan — `new:mine-plan` (tracker → geofencer, no ack; geofencer ≥ 0.4.32)
 
@@ -1818,7 +1920,18 @@ These key names and fields are a contract: renaming one breaks every truck silen
 | Current-event cab grace | `CURRENT_EVENT_CAB_GRACE_MS` (both services, must match) | 2 min |
 | Current-operator TTL | tracker `REDIS_EX` | 6 h |
 | Socket state TTL | tracker `REDIS_EXPIRE` | 13 h (`equipment:{uuid}.socket_id`, `socket:{uuid}`) |
-| Unit command timeout | tracker `unitCommandSchema.timeout_ms` | 500–30 000 ms (the Platform sends 25 s for `master-data:pull`; map-editor 25 s for `device:command`) |
+| Unit command timeout | tracker `unitCommandSchema.timeout_ms` | 500–30 000 ms (the Platform sends 25 s for `master-data:pull`, 10 s for `voice-note:new`; map-editor 25 s for `device:command`) |
+| Voice note limits | Platform `src/helpers/voice-notes.ts`; geofencer `VOICE_NOTE_MAX_BYTES` | ≤ 1 048 576 bytes, ≤ 120 s; expires 12 h after creation (`VOICE_NOTE_TTL_HOURS`) |
+| Voice note download | geofencer `VOICE_NOTE_DOWNLOAD_TIMEOUT_MS`, `VOICE_NOTE_PULL_BUDGET_MS` | 30 s per note; the Platform lists at most 20 per pull; no new download starts once a pull has run 60 s |
+| Voice note pull back-off | geofencer `VOICE_NOTE_PULL_BACKOFF_MS` | after a 404 on `GET /api/apps/voice-notes` (a Platform without voice notes), the tick's pull waits 15 min; a stored download clears it |
+| Intercom time-out timer | the Platform and the UIs cut by time (`INTERCOM_MAX_TX_MS`); the tracker and geofencer by count | 60 s = 600 frames (`seq` 0–599); later frames are dropped |
+| Intercom frame | `src/modules/intercomCodec.ts` | 100 ms, 800 μ-law bytes, `data` ≤ 1400 base64 characters |
+| Intercom start ack | tracker `INTERCOM_START_ACK_MS` | 2 s, then `timeout` |
+| Intercom delivery deadline | Platform `INTERCOM_DELIVERY_DEADLINE_MS` | 3 s after `open`; a target with no `live` delivery by then is missed |
+| Intercom idle end | Platform, geofencer and the UIs (`INTERCOM_IDLE_END_MS`) | 2 s without a frame ends a transmission (`reason: "idle"`) |
+| Intercom transmission routing on the tracker | `INTERCOM_TX_TTL_MS` | 70 s |
+| Intercom targets | Platform `INTERCOM_MAX_TARGETS` | at most 100 units per transmission |
+| Voice notes kept on the cab | geofencer `VoiceNoteHandler.prune` | played notes 7 days; unplayed notes until they expire; at most 50, dropping played notes first, then the oldest unplayed; stray files in `db/voice-notes/` are deleted |
 | Device command wait on the cab | geofencer `DEVICE_COMMAND_TIMEOUT_MS` | 20 s for update-daemon's `update:reply`, then 504 |
 | Device command timeout | map-editor `lib/devices/command.ts` | `timeout_ms` 25 000 for every action, so the cab's 504 arrives before the relay's `timeout`; map-editor waits 27 s for `unit:reply` |
 | Excavator beacon max age | tracker `EXCAVATOR_PUBLISH_MAX_AGE_MS` | 2 min |
@@ -1841,7 +1954,7 @@ These key names and fields are a contract: renaming one breaks every truck silen
 4. **The tracker must stay fast and non-5xx on `POST /api/track`.** Any error or a response slower than geofencer's 45 s realtime timeout degrades every point to delayed and silently thins the live map. After any tracker deploy, verify with the Swagger docs (`/api/docs`) and one realtime POST.
 5. **A drain marks rows only against an acknowledgement.** That means a 2xx, no `errors` array, a non-null `data`, and, where the reply is per element, the element's own verdict. The tracker must keep answering per element where it does today, and must not turn a rejection into a 2xx without an `errors` array.
 6. **The unit is always the authenticated `x-equipment-uuid`.** No endpoint may take the unit from the body or the path. Path ids on `GET /api/session/:id` and `GET`/`PATCH /api/event-logs/current/:id` are ignored and kept only for compatibility.
-7. **Socket commands are targeted, acked and addressed.** Every server → cab command goes through `unit:command` with an ack, never as a broadcast. The cab answers `{status, data | errors}`, refuses another unit's payload with 421, and treats `new:mine-plan` (and any future prompt event) as a hint, never as the only delivery path. Adding a command means changing `UNIT_COMMAND_EVENTS`, the geofencer handler, the Platform sender and this section together. **The one exception is `device:command`**, the generic relay to update-daemon: it is one allowlist entry and one handler for every daemon action, it is sent by map-editor rather than the Platform, and a new daemon action changes update-daemon, its contract and map-editor only. Its handler forwards only to the fixed channel `update:command`. No other event may be generic.
+7. **Socket commands are targeted, acked and addressed.** Every server → cab command goes through `unit:command` with an ack, never as a broadcast. The cab answers `{status, data | errors}`, refuses another unit's payload with 421, and treats `new:mine-plan` (and any future prompt event) as a hint, never as the only delivery path. Adding a command means changing `UNIT_COMMAND_EVENTS`, the geofencer handler, the Platform sender and this section together. **The one exception is `device:command`**, the generic relay to update-daemon: it is one allowlist entry and one handler for every daemon action, it is sent by map-editor rather than the Platform, and a new daemon action changes update-daemon, its contract and map-editor only. Its handler forwards only to the fixed channel `update:command`. No other event may be generic. **The intercom** (`intercom:start`, `intercom:frame`, `intercom:end`) is a stream, not a command: it rides its own bus channel rather than `unit:command`, only `intercom:start` is acked, and frames are volatile (§5 "Intercom").
 8. **The tracker Redis keys trucks read are contract.** That covers `excavator:update` and its payload, `location:excavator`, `state:{uuid}.last_updated_ms`, and the `equipment:{uuid}` identity fields. They change only together with geofencer's `ExcavatorPositionHandler`.
 9. **Schema changes the tracker declares** (Platform-owned `mine_cycle` columns and the like) ship in the order Platform migration → tracker → cabs. An older cab that omits new optional fields must keep working: a create stores null, and a PATCH leaves the stored values alone.
 
@@ -1904,7 +2017,10 @@ The `request` interceptor sets these on every call to the Platform (`geofencer: 
 | Every tracker socket connect, the first one included; skipped while `equipment:details.uuid` is empty; one pass at a time; a step is skipped once the pass has run 90 s (`ON_CONNECT_DEADLINE_MS`) | full pull first, then the drains, among them the prestart outbox | `geofencer: src/handlers/NetworkHandler.ts (NetworkHandler.handleConnect)` |
 | A successful equipment handshake | full pull | `geofencer: src/handlers/InitHandler.ts (InitHandler)`, `src/controllers/EquipmentController.ts (EquipmentController.create)` |
 | `master-data:pull` unit command (§5), including the Platform's own push of `locations` + `geofence-tuning` after a location write | the datasets it names, or all | `geofencer: src/handlers/MasterDataSocketHandler.ts` |
-| Every 60 s sync tick, under the cab's `sync:running` lock; also `POST /api/sync { "method": "all" }` on the unit | `GET /api/apps/equipments`, `GET /api/apps/geofences`, the prestart outbox drain | `geofencer: src/utils/others/SyncRunner.ts (SyncRunner.steps)` |
+| Every 60 s sync tick, under the cab's `sync:running` lock; also `POST /api/sync { "method": "all" }` on the unit | `GET /api/apps/equipments`, `GET /api/apps/geofences`, the prestart outbox drain, the voice-note pull and receipt drain (geofencer ≥ 0.4.59) | `geofencer: src/utils/others/SyncRunner.ts (SyncRunner.steps)` |
+| Every tracker socket connect, after the full pull and the session sync, within the pass's 90 s deadline (geofencer ≥ 0.4.59) | the voice-note pull and receipt drain | `geofencer: src/handlers/NetworkHandler.ts (NetworkHandler.handleConnect)` |
+| A `voice-note:new` command (§5) | `GET /api/apps/voice-notes/:id/audio`, then `PATCH /api/apps/voice-notes/:id` | `geofencer: src/handlers/VoiceNoteHandler.ts` |
+| The in-cab UI marks a note played (`GRIDLOCK_CONTRACT.md` §3) | `PATCH /api/apps/voice-notes/:id` | `geofencer: src/handlers/VoiceNoteHandler.ts` |
 | Shift-change slots: `lead_minutes` before each changeover in `settings:shifts` (default 18, set on the unit with `PUT /api/mine-plan-schedule`) and one minute after it (fixed); re-derived every 30 s; 06:30 and 18:30 while `settings:shifts` is empty | `GET /api/apps/mine-plans/:id`, then `GET /api/apps/shifts` | `geofencer: src/schedulers/mine-plan-slots.ts (minePlanSlots)`, `src/app.ts (MainApp.initSchedulers)` |
 | Operator login | `POST /api/operators/auth` | `geofencer: src/controllers/AuthController.ts (AuthController.create)` |
 | Prestart submission | `POST /api/apps/prestart-checks` | `geofencer: src/controllers/PrestartCheckController.ts (PrestartCheckController.create)` |
@@ -2013,6 +2129,29 @@ No auth. `data` is the Platform's `JSON/settings.json` as read by `loadSettings`
 | `name`, `code`, `orgCode` | string | always | site identity |
 | `shifts[].start`, `shifts[].end` | ISO-8601 string | always | only the time of day counts; every reader rebases it onto the current date |
 | `shifts[].label` | string | always | `DAY`, `NIGHT`; the label stored on sessions, plans and cycles |
+
+### Voice notes — `GET /api/apps/voice-notes`, `GET /api/apps/voice-notes/:id/audio`, `PATCH /api/apps/voice-notes/:id` (geofencer → Platform, geofencer ≥ 0.4.59)
+
+The cab's half of a dispatcher voice note (§5 "Voice note"). Code: `FMS-Backend: src/routes/apps/voice-notes.ts`, `src/helpers/voice-notes.ts`; `geofencer: src/handlers/VoiceNoteHandler.ts`. Auth on all three: `token` (`x-api-key`) then `equipmentParser` (`equipment-uuid`); no Bearer, so a note reaches a cab with nobody logged in. **A note of another unit answers 404**, never 403, so a unit cannot learn which ids exist.
+
+**Pending notes — `GET /api/apps/voice-notes`.** The notes of `req.equipment` with `delivered_at` null that have not expired, oldest first, at most 20: `{ "data": { "rows": [ /* the §5 voice_note object */ ] }, "status": true }`. The cab ingests each row it has not stored, exactly as for a `voice-note:new` command.
+
+**The audio — `GET /api/apps/voice-notes/:id/audio`.** The bytes, `Content-Type` = the note's `mime_type`, `Content-Length` = `size_bytes`, `Cache-Control: no-store`. Served while the row exists, expired or not. The cab requests it with `responseType: "arraybuffer"` and a 30 s timeout, and stores it only when the length and sha256 match the row; a mismatch is retried on the next pass.
+
+**Receipts — `PATCH /api/apps/voice-notes/:id`.**
+
+```jsonc
+{ "delivered_at": "2026-11-12T03:15:04.000Z" }                       // the cab stored the audio
+{ "played_at": "2026-11-12T03:16:10.000Z", "played_by_operator_id": 412, "played_by_name": "BUDI S" }
+// → 200
+{ "data": { /* the voice_note object */ "delivered_at": "…", "played_at": "…" }, "status": true }
+```
+
+- **First write wins**, per field: a timestamp already stored is kept, and the answer is still 200, so the cab's retries are idempotent. `played_at` with no `delivered_at` stored also stores `delivered_at` = `played_at`.
+- `played_by_operator_id` / `played_by_name` are stored with the first `played_at` only; both may be null (nobody logged in).
+- 400 when a timestamp is not an ISO date (one without a zone is read as UTC), or when the body has neither `delivered_at` nor `played_at`; 404 for an unknown, deleted or other unit's note. Unknown body fields are ignored, so a newer cab is never refused forever.
+- A receipt that changed the row is announced to dashboards as `update:voice-note` (`web-platform.md`).
+- **On the cab** each receipt is a flag on the local row (`delivered_synced`, `played_synced`), sent as its own PATCH (delivered first, then played) and drained on every connect and tick, after each stored download, and right after the UI marks a note played. A failed PATCH is retried until it lands or the note is pruned; a drain stops early only when the Platform does not answer at all.
 
 ### Equipment handshake — `POST /api/apps/equipments` (geofencer → Platform)
 
@@ -2208,13 +2347,14 @@ The keyspace the two share sits on the Platform's `REDIS_URL` client, not on its
 - **Schema ownership.** The Platform's migrations (sequelize-cli, ledger `SequelizeMeta`) own the Platform tables. The tracker's migrations (`deno task db:migrate`, ledger `tracker_migrations`, `microservice.tracker: src/db/migrator.ts`) create only the tracker-owned tables and check that the Platform tables they model exist; where `SequelizeMeta` exists they refuse to create them (`microservice.tracker: src/db/migrations/20261021000400-platform-tables.ts`).
 - **Models must agree.** Each repo models the shared tables itself; a column one model lacks is silently dropped from that repo's writes. A change to a shared table changes both models in the same change.
 - **Hooks do not cross.** A row one service writes fires no hook in the other: the Platform learns of the tracker's writes only through the bus.
+- **Capture triggers do.** The Platform's outbound webhooks own one database trigger, `webhook_capture`, on `mine_cycle`, `event_logs` and `prestartresults` (`FMS-Backend: src/helpers/webhooks/capture.ts`, migration `20261116090000-webhooks.js`). It fires for every writer, the tracker included, and records each committed change in the Platform table `webhook_events`, in the writer's own transaction, only while an enabled webhook wants that change. It can never fail a write: any error inside it becomes a `WARNING` and the change is skipped. It runs as its owner (`SECURITY DEFINER`), so the tracker's database user needs no grant. A tracker write is unchanged; it costs one indexed lookup of `webhooks` per row.
 
 > ⚠️ DEFECT (ECO-09): with `DB_ALTER=true` the tracker's cluster primary still runs `sequelize.sync({ alter, force: DB_FORCE })` against the shared database (`microservice.tracker: src/app.ts (MainApp.initDB)`) — a second, uncoordinated schema writer on Platform tables, with a drop-all switch behind it. The ownership also blurs the other way: a Platform migration alters the tracker-owned `geofence_logs` (`FMS-Backend: src/db/migrations/20260829120000-geofence-logs-uuid.js`). Target: no `sync()` in the tracker, each table migrated by its owner only.
 
 | Table | Written by | Read by | Notes |
 |---|---|---|---|
-| `mine_cycle` | tracker (`POST` / `PATCH /api/cycles` from cabs, `Cycle` model); Platform (its own routes and jobs) | both | Platform schema. Tracker writes publish `cycle:*` |
-| `event_logs` | tracker (`POST /api/event-logs`, `PATCH /api/event-logs/:id`, the `cycle_uuid` → `cycle_id` backfill); Platform (dispatcher edits, session end, shift-start sweep, return to service) | both | Platform schema. Tracker writes publish `event-log:*` |
+| `mine_cycle` | tracker (`POST` / `PATCH /api/cycles` from cabs, `Cycle` model); Platform (its own routes and jobs, including the estimates of empty phase columns, §5 "Estimated phase timestamps") | both | Platform schema. Tracker writes publish `cycle:*`. Every write passes the Platform's `webhook_capture` trigger (above). `interpolated_timestamps` is Platform-only: the tracker's model does not declare it, so its writes leave it alone |
+| `event_logs` | tracker (`POST /api/event-logs`, `PATCH /api/event-logs/:id`, the `cycle_uuid` → `cycle_id` backfill); Platform (dispatcher edits, session end, shift-start sweep, return to service) | both | Platform schema. Tracker writes publish `event-log:*`. Every write passes the Platform's `webhook_capture` trigger (above) |
 | `sessions` | tracker (`POST /api/session`, `POST /api/session/late`, the plan re-sync on each event log, the current-event follow); Platform (login, shift-change close, session end and override, prestart hour meter) | both | Platform schema. Tracker writes publish `session:*`, which nobody hears (see the channels) |
 | `engine_starts` | tracker (`EngineStart.bulkCreate`, `ON CONFLICT DO NOTHING` on `reading_uuid`) | Platform (`GET /api/v2/engine-start`) | Platform schema (`FMS-Backend: src/db/migrations/20261013090000-engine-starts.js`); the two models are field-for-field the same |
 | `mine_equipments` | Platform; tracker sets `status = 'Breakdown'` on a breakdown event log (`microservice.tracker: src/utils/routes/EventLogUtil.ts`), a static update that fires no hooks | both | Platform schema |
@@ -2226,7 +2366,7 @@ The keyspace the two share sits on the Platform's `REDIS_URL` client, not on its
 
 The Platform's own GPS tables `tracks` and `track_fixes` receive nothing from cabs, which post GPS only to the tracker.
 
-> ⚠️ DEFECT: the Platform reads the same speed in two units. `TrackHandler` multiplies `track:update.speed` by 3.6 — it takes it for m/s — while `helpers/reports.ts` treats `tracker.speed` as km/h (`STOP_SPEED_KMH`). The tracker stores and publishes the cab's value unconverted (km/h, §2), so the live map's speed is 3.6 times too high. Target: no conversion in `TrackHandler`.
+The Platform reads `speed` in one unit everywhere, km/h as the cab sent it (§2): `TrackHandler` passes `track:update.speed` to the dashboards' `equipment-move` unconverted, and `helpers/reports.ts` judges stops on `tracker.speed` in km/h (`STOP_SPEED_KMH`).
 
 ### Shared Redis — channels
 
@@ -2244,11 +2384,13 @@ map-editor, outside the five services, is a client of the same bus (`map-editor:
 | `current-event:update` | tracker (`microservice.tracker: src/controllers/EventLogController.ts (EventLogController.announce)`) and Platform (`FMS-Backend: src/helpers/current-event-service.ts (CurrentEventService)`), each only when its compare-and-set lands | Platform `RedisSubHandler` → `update:current-event` to the dashboard rooms | below |
 | `replace-event-log` | tracker, on the same landed cab writes | Platform `RedisSubHandler` → `replace-event-log` | `{ …event fields, equipment_id }`; frozen legacy |
 | `new-operator` | tracker, `POST /api/operators/auth` from a cab (§5) | Platform `RedisSubHandler` → `new-operator` | `{ id, name, username, oracle_number, login_at }` |
-| `equipment:connection` | tracker, a cab socket opening or closing (`microservice.tracker: src/handlers/SocketHandler.ts`) | Platform `startAutoCycleQueue` (on `connected: true` sends the unit's waiting auto-cycle switch, §5) | `{ equipment_uuid, socket_id, connected, at, worker, reason? }`; `at` ISO-8601; `reason` only when `connected` is false |
+| `equipment:connection` | tracker, a cab socket opening or closing (`microservice.tracker: src/handlers/SocketHandler.ts`) | Platform `startAutoCycleQueue` (on `connected: true` sends the unit's waiting auto-cycle switch, §5); Platform intercom → `intercom:presence` to the dashboards that joined the intercom | `{ equipment_uuid, socket_id, connected, at, worker, reason? }`; `at` ISO-8601; `reason` only when `connected` is false |
 | `unit:command` | Platform (`FMS-Backend: src/helpers/unit-command.ts (UnitCommandClient.send)`); map-editor (`map-editor: lib/devices/command.ts`), for `device:command` only | every tracker worker (`UnitCommandHandler`) | below; each event's payload in §5 |
 | `unit:reply` | tracker (`microservice.tracker: src/helpers/unit-command.ts (relayUnitCommand)`), exactly one per command | every Platform worker and map-editor; the sender claims it by `request_id`, and every other subscriber ignores it | below |
 | `mine-plan:create` | Platform after writing a plan: the scheduler's clone before each shift and `POST /api/mine-plans` (`FMS-Backend: src/helpers/mine-plan-publish.ts (publishNewMinePlans)`) | tracker `MinePlanHandler` → socket `new:mine-plan` to that unit only (§5) | `{ equipment_id, equipment_uuid \| null, equipment_hull_number \| null, equipment_type, plan }`; addressed by `equipment_type` (`Excavator` → `exca_id`, `Truck` → `truck_id`, else `equipment_id`); the tracker looks a null uuid up |
 | `equipment:ready` | Platform: return to service (`FMS-Backend: src/helpers/return-to-service.ts (ReturnToServiceService)`) and the v1 equipment update to `Ready` (`src/routes/equipments.ts`) | tracker `EquipmentHandler` → socket `equipment:ready` to the unit, or to every cab when no socket id is on record | the whole `mine_equipments` row; must carry `uuid`. geofencer has no listener for the socket event |
+| `intercom:downlink` | Platform, a dispatcher talking (`FMS-Backend: src/helpers/intercom.ts`) | every tracker worker (`microservice.tracker: src/helpers/intercom.ts`) → the target cabs' sockets (§5 "Intercom") | below |
+| `intercom:uplink` | tracker: start-ack deliveries and an operator talking (`microservice.tracker: src/helpers/intercom.ts`) | every Platform worker: relays to its own dashboard sockets in the room `intercom`; the owner of a downlink transmission takes its deliveries; one worker records an uplink transmission | below |
 | `haul:fix` | Platform track-ingest routes (§6) | Platform `HaulProgressHandler`, `TrackFixHandler` | Platform-internal; it only travels on the shared bus |
 
 - **Relaying.** `RedisSubHandler` relays only on the relay worker, where `PORT − START_PORT = 0` (`FMS-Backend: src/handlers/RedisSubHandler.ts (isRelayWorker)`); with `START_PORT` unset, as in dev, it relays nothing (BOOT-08). `TrackHandler` and `HaulProgressHandler` run on every worker.
@@ -2258,6 +2400,25 @@ map-editor, outside the five services, is a client of the same bus (`map-editor:
 > ⚠️ DEFECT (ECO-12): `session:update` from the Platform has no subscriber — neither the tracker nor the cab listens to it; a Platform change reaches a cab only through `unit:command`, the tracker's event-log reply or the cab's session sync (§5). Target: stop publishing it, or give it a consumer.
 
 > ⚠️ DEFECT: the Platform subscribes to neither `session:create` nor `session:update` from the tracker, so a session the tracker creates or changes — a cab's session sync, a late session, the plan re-sync — reaches no dashboard until it re-fetches, while the tracker's cycle and event-log writes are relayed live. Target: relay the tracker's `session:*` as `update:session`.
+
+#### `intercom:downlink` and `intercom:uplink`
+
+```jsonc
+// intercom:downlink — Platform → every tracker worker
+{ "type": "open", "tx_id": "itx_01JD…", "targets": ["6f0e2c1a-…", "9b1d…"], "from": { "user_id": 12, "name": "Rina" },
+  "codec": "pcmu", "sample_rate": 8000, "frame_ms": 100, "started_at": "2026-11-12T03:15:00.000Z" }
+{ "type": "frame", "tx_id": "itx_01JD…", "seq": 0, "data": "…" }
+{ "type": "close", "tx_id": "itx_01JD…", "reason": "released" }
+// intercom:uplink — tracker → every Platform worker
+{ "type": "delivery", "tx_id": "itx_01JD…", "equipment_uuid": "6f0e2c1a-…", "status": "live" }   // live | not_listening | refused | timeout; + "reason" when the cab gave one
+{ "type": "open",  "tx_id": "itx_9b8f…", "equipment_uuid": "6f0e2c1a-…", "codec": "pcmu", "sample_rate": 8000, "frame_ms": 100, "started_at": "…" }
+{ "type": "frame", "tx_id": "itx_9b8f…", "equipment_uuid": "6f0e2c1a-…", "seq": 0, "data": "…" }
+{ "type": "close", "tx_id": "itx_9b8f…", "equipment_uuid": "6f0e2c1a-…", "reason": "released" }
+```
+
+- **The worker that owns a downlink transmission** — the one holding the dispatcher's dashboard socket — publishes its messages in order, takes the `delivery` messages for its `tx_id` (every other worker ignores them), and after the transmission stores the recording and creates a voice note for each missed target (`FMS-Backend: src/helpers/intercom.ts`).
+- **An uplink transmission** is relayed by every Platform worker to its own sockets in the room `intercom` (`socket.local`), so no dashboard gets a frame twice and no frame crosses the cluster adapter. One worker records it: the one that wins `SET intercom:rec:{tx_id} NX EX 120` on the Platform's `REDIS_URL`.
+- Volume: about 10 messages a second per talking side, ~1.1 KB each. Like every channel here, fan-out only (§7 "Fan-out only").
 
 #### `track:update` payload
 
@@ -2291,7 +2452,7 @@ map-editor, outside the five services, is a client of the same bus (`map-editor:
 | `time` | string | always | the cab's string, not normalised. The Platform parses it with `trackerTimeFormats` (`FMS-Backend: src/consts/index.ts`): ISO-8601, `YYYY-MM-DD HH:mm:ss.SSS Z` or `YYYY-MM-DD HH:mm:ss Z`. An offset is required: without one it is read in the Platform server's local time. `HaulProgressHandler` drops a point whose `time` does not parse; `TrackHandler` then emits `time_diff: null` |
 | `last_updated` | string | always | the previous `state:{uuid}.last_updated`, or this point's `time` on the unit's first write |
 | `alt` | number | when the cab sent it | metres |
-| `speed` | number | when the cab sent it | km/h, unconverted; see the speed defect above |
+| `speed` | number | when the cab sent it | km/h, unconverted; the Platform's `equipment-move` passes it on as it is |
 
 > ⚠️ DEFECT (ECO-04): the payload carries `alt`, but `TrackHandler` emits `altitude: parsed.altitude`, always undefined; `FMS-Backend: src/helpers/live-tracks.ts` likewise reads `state:{uuid}.altitude`, which the hash stores as `alt`. Target: the publisher maps `alt` → `altitude`, or every reader reads `alt`.
 
@@ -2318,9 +2479,9 @@ map-editor, outside the five services, is a client of the same bus (`map-editor:
 |---|---|---|---|
 | `request_id` | string | always, both | the correlation key. A ULID from the Platform, a UUID (v4) from map-editor; the tracker requires only a non-empty string and echoes it |
 | `equipment_uuid` | string | always (command) | the unit; the tracker finds its socket at `equipment:{uuid}.socket_id` |
-| `event` | string | always (command) | must be in the tracker's allowlist `UNIT_COMMAND_EVENTS`: `session:end`, `session:override`, `auto-cycle:toggle`, `auto-cycle:get`, `master-data:pull`, `device:command` |
+| `event` | string | always (command) | must be in the tracker's allowlist `UNIT_COMMAND_EVENTS`: `session:end`, `session:override`, `auto-cycle:toggle`, `auto-cycle:get`, `master-data:pull`, `device:command`, `voice-note:new` |
 | `payload` | object | always (command) | emitted to the cab as is; shapes in §5 (for `device:command`, in update-daemon's contract) |
-| `timeout_ms` | integer 500–30000 | always (command) | how long the tracker waits for the cab's ack; the Platform sends 5000, 25000 for `master-data:pull`; map-editor sends 25000 for `device:command` |
+| `timeout_ms` | integer 500–30000 | always (command) | how long the tracker waits for the cab's ack; the Platform sends 5000, 25000 for `master-data:pull`, 10000 for `voice-note:new`; map-editor sends 25000 for `device:command` |
 | `status` | `ack` \| `timeout` \| `no_socket` | always (reply) | `ack`: the cab answered; `timeout`: the socket holder got no ack in time; `no_socket`: no worker holds a socket for the unit |
 | `outcome` | `{ status: number, data?, errors?: [{ msg }] }` | with `ack` | the cab's answer; an ack without a numeric `status` becomes `{ status: 502 }` |
 
@@ -2418,6 +2579,44 @@ Each section ends with the rules particular to its surface; these hold for all o
 ## 10. Changelog
 
 Newest first. Every change to this file adds an entry here and bumps the marker under the title (§0).
+
+### 1.5.0 — 2026-11-19
+
+**Added: the Platform estimates the empty phase timestamps of finished cycles.** Within seconds of a cycle finishing, the Platform fills its empty phase columns — from the unit's event logs first, then interpolated from similar complete cycles — and records the estimates in a new Platform-only column, `mine_cycle.interpolated_timestamps` (`{ column: epoch ms }`). It is a separate write after the tracker's, so the tracker's answer and the cab's echo hash are unchanged; a cab that re-sends its nulls has them estimated again. §5 "Estimated phase timestamps" and the `mine_cycle` row of §7 "Shared Postgres" say so.
+
+Affects: the Platform (migration `20261119090000-mine-cycle-interpolated-timestamps.js`, the interpolation pass, the repair). microservice.tracker: none — its model does not declare the column, and its writes are unchanged. geofencer, microservice.hm and microservice.gps: mirror only. Release order: the Platform migration, then anything.
+
+### 1.4.2 — 2026-11-16
+
+**Documented: the Platform's webhook capture trigger on shared tables.** The Platform's outbound webhooks add `webhook_capture`, an AFTER INSERT OR UPDATE trigger on `mine_cycle` and `event_logs` (and the Platform-only `prestartresults`). It records each committed change in the Platform table `webhook_events` for the Platform's dispatcher to send. It never fails a write, and needs no grant for the tracker's database user. §7 "Shared Postgres" says so, and so do the two tables' rows. No wire change between the five services: the tracker writes as before.
+
+Affects: the Platform (the trigger, the dispatcher, `/api/v2/webhooks`). microservice.tracker: its writes to the two tables now pass the trigger; no code change. geofencer, microservice.hm and microservice.gps: mirror only. Release order: the Platform migration, then anything.
+
+### 1.4.1 — 2026-11-13
+
+**Fixed: the Platform's live speed is km/h.** `TrackHandler` no longer multiplies `track:update.speed` by 3.6, so `equipment-move` carries the cab's km/h unconverted, the unit the reports already used. The §7 speed defect is gone, and the `track:update` payload's `speed` row says so. No wire change between the five services: the tracker's payload is as it was.
+
+Affects: the Platform (`TrackHandler`). geofencer, microservice.tracker, microservice.hm and microservice.gps: mirror only.
+
+### 1.4.0 — 2026-11-12
+
+**Added: the intercom — live push-to-talk between dispatchers and operators.** Audio travels as G.711 μ-law frames (8 kHz, 100 ms, base64) on the existing sockets and two new bus channels; there is no media server. A dispatcher talks to one unit or several; the tracker emits `intercom:start` to each target with a 2 s ack that says whether an in-cab UI is listening, then relays the frames volatile. An operator talks back through `intercom:talk-*`, which the tracker republishes on `intercom:uplink` under the socket's own identity. A target that does not answer `live` within 3 s gets the recording as a voice note with the new `source: "intercom"`. Every transmission lasts at most 60 s.
+
+- §5: the subsection "Intercom", the voice note's `source`, seven operational parameters, and the exceptions in "Device maintenance" and compatibility rule 7.
+- §7: the channels `intercom:downlink` and `intercom:uplink` with their messages, and the intercom as a second subscriber of `equipment:connection`.
+
+Affects: microservice.tracker (the fan-out and the uplink), geofencer (the handler, 0.4.60), the Platform (the sender, the recording, the fallback). microservice.hm and microservice.gps: mirror only. Release order: the Platform migration, microservice.tracker, geofencer, the Platform, FMS-frontend.
+
+### 1.3.0 — 2026-11-12
+
+**Added: dispatcher voice notes, `voice-note:new`.** A dispatcher records a note on the dashboard; the Platform stores it (table `voice_notes`, audio in `bytea`, Platform-only) and sends the new allowlisted command `voice-note:new` as a notice, with `timeout_ms` 10 000. geofencer (≥ 0.4.59) records the note, acks 200 at once, downloads the audio over HTTP, checks its length and sha256, stores it and hands it to the in-cab UI (`GRIDLOCK_CONTRACT.md` §3–§5). It also pulls every undelivered note on connect and on each 60 s tick, because a notice to an offline cab is `no_socket` and nothing is queued. It reports `delivered_at` and `played_at` back with first-write-wins receipts. A note expires 12 h after it was created.
+
+- §0 "What is not here" now points at `GRIDLOCK_CONTRACT.md` for the in-cab UI.
+- §5: the allowlist entry, the new subsection "Voice note — `voice-note:new`", and three operational parameters (limits, download, retention on the cab).
+- §6: three new cab → Platform routes, "Voice notes", and their rows in "When geofencer calls the Platform".
+- §7: `voice-note:new` and its `timeout_ms` in the `unit:command` table.
+
+Affects: microservice.tracker (the allowlist entry), geofencer (the handler, the pull and the receipts, 0.4.59), the Platform (the table, the sender, the cab routes). microservice.hm and microservice.gps: mirror only. Release order: the Platform migration, geofencer, microservice.tracker, the Platform, FMS-frontend.
 
 ### 1.2.0 — 2026-11-12
 
