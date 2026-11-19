@@ -1,6 +1,6 @@
 # Fleet wire contract
 
-<!-- fleet-contract:version 1.4.2 -->
+<!-- fleet-contract:version 1.5.0 -->
 
 The single source of truth for every wire surface between the five services that carry a vehicle's data from the cab to the Platform: GPS fixes, hour-meter readings, geofence crossings, event logs, sessions, cycles, master data and the commands that flow back.
 
@@ -1269,6 +1269,16 @@ The two methods carry different bodies:
 
 When the in-cab UI corrects the running event (`PATCH /api/event-logs` on the cab), the column the replaced event had stamped never happened. geofencer clears it and, when the corrected event is itself a cycle event, re-stamps that event's own column with the same unchanged `start_time` (`CycleHandler.remapCycleTimestamps`, driven by the `cycle_trigger` map in `settings:cycles`). The cycle PATCH body therefore carries the cleared column as an explicit **`null`**. The tracker writes it as null, so the revert lands. `arrived_at_load` is never sent as null: it anchors the cycle's existence and sits outside the unit's `TIMESTAMP_FIELDS`.
 
+#### Estimated phase timestamps — the Platform, after the write
+
+A finished cycle often reaches the server with phase columns the cab never stamped: a skipped step, a delay between two steps, a lap closed by the next arrival, a missed dump, a logout. Within seconds of the cycle finishing, the Platform fills them (`FMS-Backend: src/helpers/cycle-interpolation*.ts`):
+
+- **Which columns.** The ten between `arrived_at_load` and `finish_time`: `start_spotting`, `end_spotting`, `start_loading`, `finish_loading`, `hauling`, `arrived_at_dump`, `start_dump_spotting`, `end_dump_spotting`, `start_dumping`, `finish_dumping`. The anchors and `travelling` are never written.
+- **How.** First from the unit's own event logs (the Platform's cycle ↔ event-log repair). What is left is estimated from similar complete cycles: the same truck and route first, and spread over the real gap, so a real timestamp never moves.
+- **The marker.** `mine_cycle.interpolated_timestamps` (JSONB, Platform-owned, nullable) holds `{ column: epoch ms }` of each estimate. A column is estimated only while its value equals the recorded one: a later real value, from the cab or anyone, simply replaces it.
+- **Not in the tracker's write.** The fill is a separate Platform write after the tracker's, so the tracker's answer still echoes exactly what the cab sent, and the cab's echo hash still matches. The cab never sees the estimates.
+- **A re-sent null is filled again.** When the cab re-pushes a finished cycle (a timed-out PATCH, a retried POST answered with the stored row), the tracker writes its explicit nulls over the estimates, as it writes every field (above). The Platform's next pass estimates them again; the cab's echo of that push is its own row, so it settles.
+
 #### Cycle finish and acknowledgement stamps (geofencer ≥ 0.4.14)
 
 - **A logout finishes the open cycle on every logout code,** including Recharging (`R-D-0152`, a DELAY-typed event). The cab stamps `finish_time` and `travelling` with the logout's `start_time`, releases `current:cycle`, and sends **one** `PATCH /api/cycles/:id`, or a `POST` when the cycle was never pushed.
@@ -2343,7 +2353,7 @@ The keyspace the two share sits on the Platform's `REDIS_URL` client, not on its
 
 | Table | Written by | Read by | Notes |
 |---|---|---|---|
-| `mine_cycle` | tracker (`POST` / `PATCH /api/cycles` from cabs, `Cycle` model); Platform (its own routes and jobs) | both | Platform schema. Tracker writes publish `cycle:*`. Every write passes the Platform's `webhook_capture` trigger (above) |
+| `mine_cycle` | tracker (`POST` / `PATCH /api/cycles` from cabs, `Cycle` model); Platform (its own routes and jobs, including the estimates of empty phase columns, §5 "Estimated phase timestamps") | both | Platform schema. Tracker writes publish `cycle:*`. Every write passes the Platform's `webhook_capture` trigger (above). `interpolated_timestamps` is Platform-only: the tracker's model does not declare it, so its writes leave it alone |
 | `event_logs` | tracker (`POST /api/event-logs`, `PATCH /api/event-logs/:id`, the `cycle_uuid` → `cycle_id` backfill); Platform (dispatcher edits, session end, shift-start sweep, return to service) | both | Platform schema. Tracker writes publish `event-log:*`. Every write passes the Platform's `webhook_capture` trigger (above) |
 | `sessions` | tracker (`POST /api/session`, `POST /api/session/late`, the plan re-sync on each event log, the current-event follow); Platform (login, shift-change close, session end and override, prestart hour meter) | both | Platform schema. Tracker writes publish `session:*`, which nobody hears (see the channels) |
 | `engine_starts` | tracker (`EngineStart.bulkCreate`, `ON CONFLICT DO NOTHING` on `reading_uuid`) | Platform (`GET /api/v2/engine-start`) | Platform schema (`FMS-Backend: src/db/migrations/20261013090000-engine-starts.js`); the two models are field-for-field the same |
@@ -2569,6 +2579,12 @@ Each section ends with the rules particular to its surface; these hold for all o
 ## 10. Changelog
 
 Newest first. Every change to this file adds an entry here and bumps the marker under the title (§0).
+
+### 1.5.0 — 2026-11-19
+
+**Added: the Platform estimates the empty phase timestamps of finished cycles.** Within seconds of a cycle finishing, the Platform fills its empty phase columns — from the unit's event logs first, then interpolated from similar complete cycles — and records the estimates in a new Platform-only column, `mine_cycle.interpolated_timestamps` (`{ column: epoch ms }`). It is a separate write after the tracker's, so the tracker's answer and the cab's echo hash are unchanged; a cab that re-sends its nulls has them estimated again. §5 "Estimated phase timestamps" and the `mine_cycle` row of §7 "Shared Postgres" say so.
+
+Affects: the Platform (migration `20261119090000-mine-cycle-interpolated-timestamps.js`, the interpolation pass, the repair). microservice.tracker: none — its model does not declare the column, and its writes are unchanged. geofencer, microservice.hm and microservice.gps: mirror only. Release order: the Platform migration, then anything.
 
 ### 1.4.2 — 2026-11-16
 
