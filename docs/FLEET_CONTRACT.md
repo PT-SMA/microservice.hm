@@ -1,6 +1,6 @@
 # Fleet wire contract
 
-<!-- fleet-contract:version 1.5.0 -->
+<!-- fleet-contract:version 1.6.0 -->
 
 The single source of truth for every wire surface between the five services that carry a vehicle's data from the cab to the Platform: GPS fixes, hour-meter readings, geofence crossings, event logs, sessions, cycles, master data and the commands that flow back.
 
@@ -914,7 +914,8 @@ Both build the body in one place, `geofencer: src/helpers/sync-payloads.ts (toTr
   "remarks": null,
   "cycle_uuid": "4c2d…",                    // the unit's cycle row id, or null
   "operator": "Budi",                       // from the row's own login, or null
-  "operator_id": 183                        // server user id from the row's own login, or null
+  "operator_id": 183,                       // server user id from the row's own login, or null
+  "current_hour_meter": 5012.5              // geofencer ≥ 0.4.62: typed by the operator, or null
 }
 ```
 
@@ -931,6 +932,7 @@ Both build the body in one place, `geofencer: src/helpers/sync-payloads.ts (toTr
 | `cycle_uuid` | uuidv4 \| null | optional | When a cycle with that `uuid` exists, the tracker fills `cycle_id`; the cycle's create and update back-fill it too. |
 | `operator` | string (≥ 3 chars) \| null | optional | |
 | `operator_id` | integer ≥ 1 \| null | optional | |
+| `current_hour_meter` | number \| null | optional | The hour meter the operator typed with the activity (geofencer ≥ 0.4.62), from the local `hour_meter`. Stored in `event_logs.current_hour_meter`; zero or negative is stored as `null`, never refused. The Platform's breakdown record takes it (§7 "Shared Postgres"). Stripped by an older tracker. |
 
 **Tracker side** (`microservice.tracker: src/utils/routes/EventLogUtil.ts (createEventLog)`):
 
@@ -2354,7 +2356,7 @@ The keyspace the two share sits on the Platform's `REDIS_URL` client, not on its
 | Table | Written by | Read by | Notes |
 |---|---|---|---|
 | `mine_cycle` | tracker (`POST` / `PATCH /api/cycles` from cabs, `Cycle` model); Platform (its own routes and jobs, including the estimates of empty phase columns, §5 "Estimated phase timestamps") | both | Platform schema. Tracker writes publish `cycle:*`. Every write passes the Platform's `webhook_capture` trigger (above). `interpolated_timestamps` is Platform-only: the tracker's model does not declare it, so its writes leave it alone |
-| `event_logs` | tracker (`POST /api/event-logs`, `PATCH /api/event-logs/:id`, the `cycle_uuid` → `cycle_id` backfill); Platform (dispatcher edits, session end, shift-start sweep, return to service) | both | Platform schema. Tracker writes publish `event-log:*`. Every write passes the Platform's `webhook_capture` trigger (above) |
+| `event_logs` | tracker (`POST /api/event-logs`, `PATCH /api/event-logs/:id`, the `cycle_uuid` → `cycle_id` backfill); Platform (dispatcher edits, session end, shift-start sweep, return to service, and `breakdown_log_id` on breakdown logs) | both | Platform schema. Tracker writes publish `event-log:*`. Every write passes the Platform's `webhook_capture` trigger (above). The Platform links each breakdown log to its maintenance record in the Platform-only `equipment_breakdown_logs`, opening one per episode, with the log's `current_hour_meter` (`FMS-Backend: src/helpers/breakdown-record.ts`): it touches only `breakdown_log_id`, never `updated_at` |
 | `sessions` | tracker (`POST /api/session`, `POST /api/session/late`, the plan re-sync on each event log, the current-event follow); Platform (login, shift-change close, session end and override, prestart hour meter) | both | Platform schema. Tracker writes publish `session:*`, which nobody hears (see the channels) |
 | `engine_starts` | tracker (`EngineStart.bulkCreate`, `ON CONFLICT DO NOTHING` on `reading_uuid`) | Platform (`GET /api/v2/engine-start`) | Platform schema (`FMS-Backend: src/db/migrations/20261013090000-engine-starts.js`); the two models are field-for-field the same |
 | `mine_equipments` | Platform; tracker sets `status = 'Breakdown'` on a breakdown event log (`microservice.tracker: src/utils/routes/EventLogUtil.ts`), a static update that fires no hooks | both | Platform schema |
@@ -2379,7 +2381,7 @@ map-editor, outside the five services, is a client of the same bus (`map-editor:
 | `track:update` | tracker, for every point — realtime or replayed in a batch — that wins the `state:{uuid}` compare-and-set (`microservice.tracker: src/utils/routes/TrackUtil.ts (TrackUtil.updateState)`) | Platform `TrackHandler` (emits `equipment-move` to its own worker's clients) and `HaulProgressHandler` | below |
 | `excavator:update` | tracker, the same winning points for an `Excavator`, not at `[0, 0]`, at most 120 s old | none on the Platform; truck cabs (§5) | `{ equipment_id, equipment_uuid, hull_number, asset_name, lon, lat, at_ms }` |
 | `cycle:create`, `cycle:update` | tracker `Cycle` model hooks (`microservice.tracker: src/models/hooks.ts (registerPublishHooks)`) | Platform `RedisSubHandler` → socket `new-cycle`, `update-cycle` | the whole `mine_cycle` row, `id` included |
-| `event-log:create`, `event-log:update` | tracker `EventLog` model hooks | Platform `RedisSubHandler` → `new-event-log`, `update-event-log` | the whole `event_logs` row |
+| `event-log:create`, `event-log:update` | tracker `EventLog` model hooks | Platform `RedisSubHandler` → `new-event-log`, `update-event-log`, and the row's `id` to the breakdown records (`FMS-Backend: src/helpers/breakdown-record.ts`) | the whole `event_logs` row |
 | `session:create`, `session:update` | tracker `Session` model hooks; `session:update` also the Platform's `Session.afterUpdate` hook (`FMS-Backend: src/init.ts`) and `src/routes/operators/prestart-checks.ts` | none | the whole `sessions` row |
 | `current-event:update` | tracker (`microservice.tracker: src/controllers/EventLogController.ts (EventLogController.announce)`) and Platform (`FMS-Backend: src/helpers/current-event-service.ts (CurrentEventService)`), each only when its compare-and-set lands | Platform `RedisSubHandler` → `update:current-event` to the dashboard rooms | below |
 | `replace-event-log` | tracker, on the same landed cab writes | Platform `RedisSubHandler` → `replace-event-log` | `{ …event fields, equipment_id }`; frozen legacy |
@@ -2579,6 +2581,15 @@ Each section ends with the rules particular to its surface; these hold for all o
 ## 10. Changelog
 
 Newest first. Every change to this file adds an entry here and bumps the marker under the title (§0).
+
+### 1.6.0 — 2026-11-20
+
+**Added: the operator's hour meter on event logs, and a maintenance record for every breakdown.**
+
+- **The hour meter on event logs.** An event log can carry `current_hour_meter`, the reading the operator typed with the activity (geofencer ≥ 0.4.62; §5 "Event-log creation"). The tracker stores it; zero or negative is stored as null, never refused.
+- **A record for every breakdown.** The Platform now opens a maintenance record (`equipment_breakdown_logs`, Platform-only) from every breakdown event log, whoever wrote it. That includes the cab through the tracker, which had none before. One record per episode; the log is linked through `breakdown_log_id`. The Platform hears tracker writes on `event-log:*` and converges every 5 minutes (§7 "Shared Postgres", the `event_logs` row and the channel table).
+
+Affects: microservice.tracker (accepts and stores `current_hour_meter`), geofencer (0.4.62 sends it), the Platform (the breakdown records, migration `20261120090000-breakdown-log-source.js`). microservice.hm and microservice.gps: mirror only. Release order: the Platform migration and the tracker, then geofencer. An older tracker strips the field, and an older geofencer omits it.
 
 ### 1.5.0 — 2026-11-19
 
