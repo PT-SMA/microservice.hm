@@ -1,6 +1,6 @@
 # Fleet wire contract
 
-<!-- fleet-contract:version 1.6.0 -->
+<!-- fleet-contract:version 1.6.1 -->
 
 The single source of truth for every wire surface between the five services that carry a vehicle's data from the cab to the Platform: GPS fixes, hour-meter readings, geofence crossings, event logs, sessions, cycles, master data and the commands that flow back.
 
@@ -2386,7 +2386,7 @@ map-editor, outside the five services, is a client of the same bus (`map-editor:
 | `current-event:update` | tracker (`microservice.tracker: src/controllers/EventLogController.ts (EventLogController.announce)`) and Platform (`FMS-Backend: src/helpers/current-event-service.ts (CurrentEventService)`), each only when its compare-and-set lands | Platform `RedisSubHandler` → `update:current-event` to the dashboard rooms | below |
 | `replace-event-log` | tracker, on the same landed cab writes | Platform `RedisSubHandler` → `replace-event-log` | `{ …event fields, equipment_id }`; frozen legacy |
 | `new-operator` | tracker, `POST /api/operators/auth` from a cab (§5) | Platform `RedisSubHandler` → `new-operator` | `{ id, name, username, oracle_number, login_at }` |
-| `equipment:connection` | tracker, a cab socket opening or closing (`microservice.tracker: src/handlers/SocketHandler.ts`) | Platform `startAutoCycleQueue` (on `connected: true` sends the unit's waiting auto-cycle switch, §5); Platform intercom → `intercom:presence` to the dashboards that joined the intercom | `{ equipment_uuid, socket_id, connected, at, worker, reason? }`; `at` ISO-8601; `reason` only when `connected` is false |
+| `equipment:connection` | tracker, a cab socket opening or closing (`microservice.tracker: src/handlers/SocketHandler.ts`) | Platform `startAutoCycleQueue` (on `connected: true` sends the unit's waiting auto-cycle switch, §5); Platform intercom → `intercom:presence` to the dashboards that joined the intercom; Platform `RedisSubHandler` → `update:unit-connection` (`{ equipment_id, equipment_uuid, connected, at }`) to the dashboard rooms, which tells a unit with no GPS fix (connected) from an offline one on Live View; map-editor (`lib/live/connections.ts`), for its `/devices` page and its public live map | `{ equipment_uuid, socket_id, connected, at, worker, reason? }`; `at` ISO-8601; `reason` only when `connected` is false |
 | `unit:command` | Platform (`FMS-Backend: src/helpers/unit-command.ts (UnitCommandClient.send)`); map-editor (`map-editor: lib/devices/command.ts`), for `device:command` only | every tracker worker (`UnitCommandHandler`) | below; each event's payload in §5 |
 | `unit:reply` | tracker (`microservice.tracker: src/helpers/unit-command.ts (relayUnitCommand)`), exactly one per command | every Platform worker and map-editor; the sender claims it by `request_id`, and every other subscriber ignores it | below |
 | `mine-plan:create` | Platform after writing a plan: the scheduler's clone before each shift and `POST /api/mine-plans` (`FMS-Backend: src/helpers/mine-plan-publish.ts (publishNewMinePlans)`) | tracker `MinePlanHandler` → socket `new:mine-plan` to that unit only (§5) | `{ equipment_id, equipment_uuid \| null, equipment_hull_number \| null, equipment_type, plan }`; addressed by `equipment_type` (`Excavator` → `exca_id`, `Truck` → `truck_id`, else `equipment_id`); the tracker looks a null uuid up |
@@ -2581,6 +2581,14 @@ Each section ends with the rules particular to its surface; these hold for all o
 ## 10. Changelog
 
 Newest first. Every change to this file adds an entry here and bumps the marker under the title (§0).
+
+### 1.6.1 — 2026-11-20
+
+**Clarified: who consumes `equipment:connection`.** No wire change.
+
+- §7 "Shared Redis — channels": the Platform's relay worker now also turns `equipment:connection` into `update:unit-connection` for the dashboards, and map-editor reads it for its `/devices` page and its public live map. Both live maps show a unit whose cab is connected but sends no fix as "GPS no fix", and one whose cab is not connected as "offline". A tracker worker that dies without its shutdown leaves its units "connected" for the `socket:{uuid}` TTL, so those maps read them as "GPS no fix" until the cab reconnects.
+
+Affects: the Platform (the relay). microservice.tracker, geofencer, microservice.hm and microservice.gps: mirror only.
 
 ### 1.6.0 — 2026-11-20
 
