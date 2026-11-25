@@ -1,6 +1,6 @@
 # Fleet wire contract
 
-<!-- fleet-contract:version 1.6.1 -->
+<!-- fleet-contract:version 1.9.0 -->
 
 The single source of truth for every wire surface between the five services that carry a vehicle's data from the cab to the Platform: GPS fixes, hour-meter readings, geofence crossings, event logs, sessions, cycles, master data and the commands that flow back.
 
@@ -940,7 +940,7 @@ Both build the body in one place, `geofencer: src/helpers/sync-payloads.ts (toTr
 - **Breakdown flip** runs first, as described under the offline-first rules.
 - **Session claiming.** The live session (`current-session:{equipment_id}`, open, `end_hour_meter = 0`) claims the row only when `start_time` falls inside the session's lifetime (`sessionCovers`). Otherwise the row is stored **session-less**, with `created_by: "geofencer (drained)"`. A missing session never fails the POST.
 - **Shift.** `shift` is the shift of `start_time` resolved against `settings:shifts`, even when a session claims the row. The claiming session's shift is used only while the settings are not cached.
-- **Location.** The tracker resolves `location`/`location_id` itself, from `latitude`/`longitude`. It takes the nearest active `mine_locations` geometry within `EVENT_LOG_LOCATION_MAX_METERS` (250 m, env-overridable) via PostGIS `ST_Distance`. That distance is 0 anywhere inside a polygon, and lines are matched along their length. The payload's `location_name`/`location_id` are kept only when nothing is in range, when the coordinates are unusable (null, non-finite, or exactly `0, 0`), or when the lookup fails. Both columns always come from one source. A failing lookup never fails the POST. The cab's own label covers much less: it comes from a Redis geo set holding only `Point` locations, searched within 20 m. So send accurate coordinates. `location_to_*` are cycle destination fields and are not touched by this.
+- **Location.** The tracker resolves `location`/`location_id` itself, from `latitude`/`longitude`. It takes the nearest active `mine_locations` geometry within `EVENT_LOG_LOCATION_MAX_METERS` (250 m, env-overridable) via PostGIS `ST_Distance`. That distance is 0 anywhere inside a polygon, and lines are matched along their length. The payload's `location_name`/`location_id` are kept only when nothing is in range, when the coordinates are unusable (null, non-finite, or exactly `0, 0`), or when the lookup fails. Both columns always come from one source. A failing lookup never fails the POST. The cab's own label covers much less: it comes from a Redis geo set holding only `Point` locations, searched within 20 m — except on a step the cab's auto-cycle takes at a `Geo Fence` polygon with a `site_type` (§6), which names that polygon (geofencer ≥ 0.4.64). So send accurate coordinates. `location_to_*` are cycle destination fields and are not touched by this.
 - **Operator.** The claiming session's `operator_name`/`operator_id` win. Next comes the payload's `operator`/`operator_id`, and last the mirrored `current-operator:{uuid}` (§ Current operator).
 - **Answer.** A single object answers `200 {"data": <row>, "session"?: <session>}`. An array answers `{"data": [{ "uuid", "stored": true, "id" } | { "uuid", "stored": false, "msg" }], "session"?}`. For `session`, see Plan re-sync below.
 
@@ -1127,7 +1127,7 @@ The tracker therefore **merges** the blob rather than applying it wholesale.
   - **another operator's** (`operator_id` differs).
 
   A refusal is recorded as `rejected` (reason `closed-session` / `other-operator`) and changes nothing locally: no merge, no `LoginHistory.synced_id`, no clock offset. An open session of the same operator under a different id is accepted. That is what a tracker that lost the unit's row answers, and refusing it would stop session sync entirely.
-- **A missed dispatcher logout.** When the refused closed session is **this** session and its `updated_by` is `"Dispatch: end session"` (`SESSION_ENDED_BY_DISPATCH`), the cab logs out. This is the `session:end` it missed while offline. A session closed by the shift close-out carries no marker and never logs an offline operator out.
+- **A missed dispatcher logout.** When the refused closed session is **this** session and its `updated_by` is `"Dispatch: end session"` (`SESSION_ENDED_BY_DISPATCH`), the cab logs out. This is the `session:end` it missed while offline. The Platform sets the same marker when it ends a session because its operator logged in on another unit (§6 "Operator login"), so the forgotten unit logs out as soon as it syncs. A session closed by the shift close-out carries no marker and never logs an offline operator out, and neither does a session the Platform hands over to the next operator on the same unit (`updated_by: "Login: change of operator"`).
 - **Merging.** An accepted reply is merged into `current:session` **without its null values** (`withoutNulls`). The current login's `synced_id` is set from `data.id`, and local `session:update` is emitted. The same null rule applies to the re-synced session on event-log replies.
 
 #### A created session keeps the unit's identity and takes the equipment's current mine plan
@@ -1493,7 +1493,7 @@ The unit runs the geofence state machine itself (`geofencer: src/handlers/RedisG
 | --- | --- | --- | --- |
 | `uuid` | string \| null | optional | `geofence_logs.uuid`, UNIQUE and nullable. |
 | `location` | string, ≥ 1 | required | Stored as sent; the tracker does not resolve it. |
-| `location_type` | `Loading Site` \| `Dumping Site` \| `Geo Fence` \| `Line` \| `General` \| null | optional | Today only Loading and Dumping Sites produce events, because only `Point` locations are geofenced. It is null on a synthetic exit. |
+| `location_type` | `Loading Site` \| `Dumping Site` \| `Geo Fence` \| `Line` \| `General` \| null | optional | Today only Loading and Dumping Sites produce events, because only `Point` locations are geofenced: a `Geo Fence` polygon with a `site_type` (§6) drives the cab's auto-cycle but produces no crossing here. It is null on a synthetic exit. |
 | `state` | enum | required | |
 | `distance` | number (m) | required | |
 | `lat`, `lon` | number \| null | optional | The **vehicle's** position, never the site's. Both are null on the synthetic exit the cab emits for a site that dropped out of its 90 m search radius, which is stored with `coordinates: null`. |
@@ -1599,7 +1599,11 @@ The dashboard's Equipment Operations actions reach the cab through the relay. **
 
 ```jsonc
 // session:end: log the operator out on the event the dispatcher chose
-{ "equipment_uuid": "6f0e2c1a-…", "session_id": 55, "event_id": 30, "event_code": "CO-S-0030", "done_reason": "Change Operator", "done_at": "…" }
+{ "equipment_uuid": "6f0e2c1a-…", "session_id": 55, "event_id": 30, "event_code": "CO-S-0030", "done_reason": "Change Operator", "done_at": "…",
+  "event_log_uuid": "9a4c…", "cause": "dispatch", "remarks": "Session ended from the dashboard by Dispatcher Satu" }
+// session:end: the operator logged in on another unit (§6 "Operator login")
+{ "equipment_uuid": "6f0e2c1a-…", "session_id": 41, "event_id": 156, "event_code": "WO-S-0156", "done_reason": "Wait Operator", "done_at": "…",
+  "event_log_uuid": "1f2e…", "cause": "login-elsewhere", "remarks": "Operator Budi logged in on DT-1023" }
 // session:override: merge a dispatcher's change into current:session
 { "equipment_uuid": "6f0e2c1a-…", "session_id": 55, "fields": { "material_id": 1, "material_code": "OB", "block_id": 5 } }
 ```
@@ -1610,6 +1614,9 @@ The dashboard's Equipment Operations actions reach the cab through the relay. **
 | `session_id` | number | required | must be the session this cab runs |
 | `event_code` | string | required (`end`) | must be in this cab's event master data |
 | `event_id`, `done_reason`, `done_at` | | optional (`end`) | |
+| `event_log_uuid` | string (UUID) | optional (`end`, Platform ≥ FLEET 1.7.0) | the `uuid` of the log the Platform wrote for this logout. The cab gives its own log for the event this id (geofencer ≥ 0.4.63), so the tracker's `uuid` lookup drops the copy and the unit keeps one log, not two. An older cab ignores it and the unit gets both |
+| `cause` | `"dispatch"` \| `"login-elsewhere"` | optional (`end`) | why the Platform ended the session; absent means `dispatch` |
+| `remarks` | string | optional (`end`) | the remark on the Platform's log, e.g. `Operator Budi logged in on DT-1023` |
 | `fields` | object | required (`override`) | only plan-session fields are accepted |
 
 The ack is `{ status: 200, data }` or `{ status, errors: [{ msg }] }`. The checks run in this order:
@@ -1623,7 +1630,8 @@ The ack is `{ status: 200, data }` or `{ status, errors: [{ msg }] }`. The check
 | 200 | done: `{ "logged_out": true, "session_id" }` / `{ "applied": [fields] }` |
 | 500 | it failed on the cab |
 
-- **`session:end`** opens the event through the normal chain (the running log closes and the event becomes `current:event`). It then runs the cab's own logout (`handleLogoutEvents`) for **any** code, not only `LOGOUT_EVENT_CODES`, and deletes `current:token` / `current:operator` before acking.
+- **`session:end`** opens the event through the normal chain (the running log closes and the event becomes `current:event`). It then runs the cab's own logout (`handleLogoutEvents`) for **any** code, not only `LOGOUT_EVENT_CODES`, and deletes `current:token` / `current:operator` before acking. geofencer ≥ 0.4.63 first records a fresh device hour-meter reading (`hour-meter:state`, §4) as the login's end hour meter, so a forced logout carries one.
+- **Who sends `session:end`.** A dispatcher's End session (`cause: "dispatch"`, any event), and the Platform itself when the operator logs in on another unit (`cause: "login-elsewhere"`, always `WO-S-0156` Wait Operator; §6 "Operator login"). Both mark the closed session `updated_by: "Dispatch: end session"`, so a cab that missed the command logs out on its next sync either way.
 - **`session:override`** merges only the plan-session fields (`PLAN_SESSION_FIELDS` without `updated_at`): excavator, loading point, materials/blocks, material, dumping point and cell, block, foreman. It re-stamps `updated_at`, so the cab's next session push carries the change, and emits local `session:update`.
 - **Offline.** A cab that missed `session:end` logs out on its next session sync (§ What the cab does with the answer). A missed `session:override` is not replayed.
 
@@ -1649,14 +1657,16 @@ This is the Platform asking a cab to pull master data **now** rather than at its
 { "status": 421, "errors": [{ "msg": "meant for 6f0e2c1a-…, this unit is 9b1d…" }] }
 ```
 
-- **`datasets`** names some of `MASTER_DATASETS`: `equipment`, `locations`, `events`, `cycle-settings`, `shifts`, `operators`, `mine-plan`, `prestart-checks`, `materials`, `pinned-events`, `geofence-tuning`. Absent, `null` or `[]` pulls all of them. A name given twice is pulled once.
+- **`datasets`** names some of `MASTER_DATASETS`: `equipment`, `locations`, `events`, `cycle-settings`, `shifts`, `operators`, `mine-plan`, `prestart-checks`, `materials`, `pinned-events`, `geofence-tuning`, and (geofencer ≥ 0.4.63) `auto-event-schedules`. Absent, `null` or `[]` pulls all of them. A name given twice is pulled once.
 - **200** comes once the pull is stored. `data` is the cab's `/api/dev/master-data` answer cut to the requested datasets, in `MASTER_DATASETS` order. Each dataset's `status.ok` is true (stored), false (failed at `stage` `pull` or `store`, with `error`) or null (skipped; for example the mine plan of a unit with no identity yet). A 200 can therefore report failed datasets.
 - **400**: `datasets` is not an array or names an unknown category. **421**: another unit, none, or no identity. **500**: it failed on the cab. In all three cases nothing is pulled.
 - **One pull at a time.** A request during a running full pull (boot, reconnect, handshake, another command) joins it. Any other request waits for the pull ahead of it.
-- **Timeout.** The Platform sends this with `timeout_ms: 25000`. A full pull is eleven requests to the Platform, so the ack may arrive after the relay answered `timeout`; the pull still completes. A cab without a socket is not queued for, because it pulls everything on reconnect.
+- **Timeout.** The Platform sends this with `timeout_ms: 25000`. A full pull is twelve requests to the Platform (eleven before geofencer 0.4.63), so the ack may arrive after the relay answered `timeout`; the pull still completes. A cab without a socket is not queued for, because it pulls everything on reconnect.
 - **After a location changes.** A few seconds after a location is created, changed or deleted on the Platform (a burst counts as one change), the Platform sends every unit `{ "equipment_uuid", "datasets": ["locations", "geofence-tuning"] }`. Storing `locations` takes effect at once:
   - the `locations:*` geo members and the SQLite `Location` rows the Platform no longer lists are removed, never on an empty reply;
-  - the auto-cycle driver drops its cached sites (local event `master-data:stored`).
+  - the auto-cycle driver drops its cached sites (local event `master-data:stored`);
+  - the geofence automatic-event polygons are rebuilt (geofencer ≥ 0.4.63).
+- **After an automatic-event schedule changes.** A few seconds after a schedule is created, changed or deleted, the Platform sends every unit `{ "equipment_uuid", "datasets": ["auto-event-schedules"] }`, **always alone**: a cab older than the dataset answers 400 to a pull naming it and pulls nothing, so bundling it would cost that cab the other datasets too. The Platform logs such a refusal and moves on; the cab learns the schedules once it is upgraded.
 
 #### Device maintenance — `device:command` (tracker → geofencer, with ack; geofencer ≥ 0.4.58)
 
@@ -1839,11 +1849,11 @@ The Platform publishes a whole `mine_equipments` row on the bus channel `equipme
 
 ### Tracker Redis read by geofencer
 
-Truck cabs read the tracker's Redis directly through `REDIS_SVR_URL` (`geofencer: src/modules/redis.ts`), for the excavator beacon only. Nothing else in this pair crosses Redis.
+Truck cabs read the tracker's Redis directly through `REDIS_SVR_URL` (`geofencer: src/modules/redis.ts`), for the excavator beacon only — positions, and from geofencer 0.4.65 whether an excavator is online. Nothing else in this pair crosses Redis.
 
 #### The excavator beacon — channel `excavator:update` (tracker → geofencer trucks, geofencer ≥ 0.4.23)
 
-Every truck keeps the positions of the excavators around it in its own local Redis (`geofencer: src/handlers/ExcavatorPositionHandler.ts`; on by default, `EXCAVATOR_BEACON`). These positions feed the cycle's `actual_exca_*` columns. The auto-cycle driver does not use them (geofencer ≥ 0.4.44 drives loading from spotting and the loading radius). Trucks subscribe to this small channel instead of `track:update`, which carries every unit's fix.
+Every truck keeps the positions of the excavators around it in its own local Redis (`geofencer: src/handlers/ExcavatorPositionHandler.ts`; on by default, `EXCAVATOR_BEACON`). These positions feed the cycle's `actual_exca_*` columns and, from geofencer 0.4.65, the auto-cycle: an **online** excavator with its own radii is a moving loading site (§6 "Excavator radii"). Trucks subscribe to this small channel instead of `track:update`, which carries every unit's fix.
 
 **Publisher** (`microservice.tracker: src/utils/routes/TrackUtil.ts (updateState)`, `src/helpers/excavator-update.ts (excavatorUpdatePayload)`). Right after `track:update`, a point that won the compare-and-set, from the realtime or the delayed path, is also published here when all of these hold:
 
@@ -1874,7 +1884,7 @@ Pub/sub delivers only what is published while subscribed. So on every (re)connec
 | --- | --- | --- |
 | geo set `location:excavator` (members = equipment uuids) | the live-state compare-and-set, as `location:{category lowercased}` | `GEOSEARCH` around the truck's last fix (or the entering point), **500 m**, **COUNT 20**, `WITHCOORD` |
 | hash `state:{uuid}` (`last_updated_ms`, `last_updated`, `track`, `alt`, `fix`, `speed`, `operator_id`; no TTL) | the compare-and-set | `HGET last_updated_ms` only: the seed's freshness, skipped when older than 2 min |
-| hash `equipment:{uuid}` (`equipment_id`, `equipment_hull_number`, `equipment_asset_name`, `equipment_uuid`, `equipment_category`, `equipment_subcategory`, `socket_id`) | `EquipmentUtil.checkEquipment`; `socket_id` from the socket lifecycle | `HGETALL`, only for a seeded uuid the cab's own `Equipment` table does not know; `equipment_id`, `equipment_hull_number` and `equipment_asset_name` are used |
+| hash `equipment:{uuid}` (`equipment_id`, `equipment_hull_number`, `equipment_asset_name`, `equipment_uuid`, `equipment_category`, `equipment_subcategory`, `socket_id`) | `EquipmentUtil.checkEquipment`; `socket_id` from the socket lifecycle | `HGETALL`, only for a seeded uuid the cab's own `Equipment` table does not know; `equipment_id`, `equipment_hull_number` and `equipment_asset_name` are used. From geofencer 0.4.65 also `HGET socket_id`, for an excavator near the truck that has radii: the online check below |
 
 These key names and fields are a contract: renaming one breaks every truck silently.
 
@@ -1883,6 +1893,7 @@ These key names and fields are a contract: renaming one breaks every truck silen
 - **`REDIS_SVR_URL` must point at the Redis instance the tracker publishes on.** Pub/sub does not cross instances. Left on the cab's own Redis (the `.env` default), the cab never sees an excavator, every cycle records the planned excavator as the actual one, and boot logs a warning. Give the cabs a restricted Redis user with `SUBSCRIBE`, `GEOSEARCH`, `HGET` and `HGETALL`.
 - **It never holds up the cab.** node-redis `connect()` never resolves while the server is unreachable, so the subscription is started and left pending. Every seed command has a **3 s** deadline (`EXCAVATOR_REMOTE_TIMEOUT_MS`), because node-redis queues commands on a dead link instead of failing them. Errors are logged once per outage, and node-redis reconnects and resubscribes by itself.
 - **Stale is absent.** A position older than `EXCAVATOR_POSITION_FRESH_MS` (2 min, by the fix's own time) is not used. A parked excavator reports once a minute, so one missed heartbeat makes it absent for that moment.
+- **Online is connected and fresh** (geofencer ≥ 0.4.65, `ExcavatorPositionHandler.online`). An excavator can be an auto-cycle site only while its unit is connected to a tracker worker — `socket_id` is present on `equipment:{uuid}`, which the socket lifecycle sets on connect and removes on disconnect (§5 "Socket lifecycle") — **and** its position is fresh. No operator needs to be logged in on the excavator: its unit beacons regardless. The cab asks only for excavators near the truck that have radii, at most once per excavator every **15 s** (`EXCAVATOR_ONLINE_CACHE_MS`), under the 3 s deadline; a read that fails or times out counts as offline. Like every connection state here it is advisory: a worker killed with SIGKILL leaves `socket_id` for its TTL.
 - **Only trucks subscribe.** Excavators need nothing beyond posting their fixes to `POST /api/track`.
 - **Deploy smoke check.** On the tracker's Redis, `PUBSUB NUMSUB excavator:update` should be ≥ 1 per connected truck.
 
@@ -1957,7 +1968,7 @@ These key names and fields are a contract: renaming one breaks every truck silen
 5. **A drain marks rows only against an acknowledgement.** That means a 2xx, no `errors` array, a non-null `data`, and, where the reply is per element, the element's own verdict. The tracker must keep answering per element where it does today, and must not turn a rejection into a 2xx without an `errors` array.
 6. **The unit is always the authenticated `x-equipment-uuid`.** No endpoint may take the unit from the body or the path. Path ids on `GET /api/session/:id` and `GET`/`PATCH /api/event-logs/current/:id` are ignored and kept only for compatibility.
 7. **Socket commands are targeted, acked and addressed.** Every server → cab command goes through `unit:command` with an ack, never as a broadcast. The cab answers `{status, data | errors}`, refuses another unit's payload with 421, and treats `new:mine-plan` (and any future prompt event) as a hint, never as the only delivery path. Adding a command means changing `UNIT_COMMAND_EVENTS`, the geofencer handler, the Platform sender and this section together. **The one exception is `device:command`**, the generic relay to update-daemon: it is one allowlist entry and one handler for every daemon action, it is sent by map-editor rather than the Platform, and a new daemon action changes update-daemon, its contract and map-editor only. Its handler forwards only to the fixed channel `update:command`. No other event may be generic. **The intercom** (`intercom:start`, `intercom:frame`, `intercom:end`) is a stream, not a command: it rides its own bus channel rather than `unit:command`, only `intercom:start` is acked, and frames are volatile (§5 "Intercom").
-8. **The tracker Redis keys trucks read are contract.** That covers `excavator:update` and its payload, `location:excavator`, `state:{uuid}.last_updated_ms`, and the `equipment:{uuid}` identity fields. They change only together with geofencer's `ExcavatorPositionHandler`.
+8. **The tracker Redis keys trucks read are contract.** That covers `excavator:update` and its payload, `location:excavator`, `state:{uuid}.last_updated_ms`, the `equipment:{uuid}` identity fields and its `socket_id` (the online check). They change only together with geofencer's `ExcavatorPositionHandler`.
 9. **Schema changes the tracker declares** (Platform-owned `mine_cycle` columns and the like) ship in the order Platform migration → tracker → cabs. An older cab that omits new optional fields must keep working: a create stores null, and a PATCH leaves the stored values alone.
 
 ## 6. geofencer ⇄ FMS-Backend
@@ -2035,8 +2046,8 @@ The `request` interceptor sets these on every call to the Platform (`geofencer: 
 
 | Dataset | Platform endpoint | Platform answers (`data`) | Stored on the cab |
 |---|---|---|---|
-| `equipment` | `GET /api/apps/equipments` | `mine_equipments` rows of category `Grader`, `Compactor`, `Truck`, `Excavator`, `Dozer`, timestamps excluded | SQLite `Equipment`, find-or-create on `svr_id`; an existing row gets `status` and `tonnage`. The unit's own `status` also goes to `equipment:details.status`, unless the cab holds a breakdown the tracker has not stored yet (`geofencer: src/helpers/status-ownership.ts (serverStatusMayOverwrite)`) |
-| `locations` | `GET /api/apps/locations` | every `mine_locations` row, deactivated ones included, timestamps excluded | SQLite `Location`, upsert on `svr_id`; Point geometries geo-added to `locations:{kebab(category)}` with the location `code` as member; geo members and SQLite rows the payload no longer lists are removed; an empty payload removes nothing |
+| `equipment` | `GET /api/apps/equipments` | `mine_equipments` rows of category `Grader`, `Compactor`, `Truck`, `Excavator`, `Dozer`, timestamps excluded; an `Excavator`'s `extra_props` may carry `departure_radius` and `loading_radius` (below) | SQLite `Equipment`, find-or-create on `svr_id`; an existing row gets `status` and `tonnage`, and (geofencer ≥ 0.4.65) every row gets `departure_radius` / `loading_radius` from `extra_props`, null when unset. The unit's own `status` also goes to `equipment:details.status`, unless the cab holds a breakdown the tracker has not stored yet (`geofencer: src/helpers/status-ownership.ts (serverStatusMayOverwrite)`) |
+| `locations` | `GET /api/apps/locations` | every `mine_locations` row, deactivated ones included (`active: false`), timestamps excluded; `properties` may carry `auto_event` and `site_type` (below) | SQLite `Location`, upsert on `svr_id`, `active` included (geofencer ≥ 0.4.63); Point geometries geo-added to `locations:{kebab(category)}` with the location `code` as member; geo members and SQLite rows the payload no longer lists are removed; an empty payload removes nothing. `Geo Fence` polygons with an `auto_event` are evaluated for geofence automatic events, and those with a `site_type` are loading or dumping sites for the auto-cycle (geofencer ≥ 0.4.64) (below) |
 | `geofence-tuning` | `GET /api/apps/geofences` | below | the in-memory `GeofenceTuningStore`, persisted to RedisJSON `settings:geofence` |
 | `events` | `GET /api/apps/events` (no `type` query) | `mine_event` rows with a non-empty `type` | SQLite `Event`, find-or-create on (`svr_id`, `code`) |
 | `operators` | `GET /api/apps/users` | every `users` row of type `Operator` or `Administrator`, every column including the bcrypt `password` | SQLite `Operator` — the local name for these users (ECO-12) — find-or-create on (`svr_id`, `oracle_number`); the hash serves the offline login |
@@ -2046,10 +2057,95 @@ The `request` interceptor sets these on every call to the Platform (`geofencer: 
 | `prestart-checks` | `GET /api/master-data?type=prestart-checks` | `{ count, rows }` of `prestart_checks` whose `equipment_type` and `equipment_subcategory` are the unit's category and subcategory; columns `id, check, description, category, equipment_type, equipment_subcategory, created_at` | RedisJSON `settings:prestart-check`: the whole envelope `{ data: { count, rows }, status, elapsedTime }` |
 | `materials` | `GET /api/master-data?type=materials` | `{ count, rows }` of `mine_materials` | SQLite `Material`, find-or-create on `svr_id`; an existing row gets `name` and `code` |
 | `pinned-events` | — | served by the tracker (`GET /api/pinned-events`, §5) | RedisJSON `events:pinned` |
+| `auto-event-schedules` (geofencer ≥ 0.4.63) | `GET /api/apps/auto-event-schedules` | below | RedisJSON `settings:auto-event-schedules`. The dataset is authoritative: a 200 with no schedules clears them; a failed pull (a 404 from an older Platform included) keeps the last copy |
 
-Code: `FMS-Backend: src/routes/apps/equipments.ts`, `src/routes/apps/locations.ts`, `src/routes/apps/geofences.ts`, `src/routes/apps/events.ts`, `src/routes/apps/users.ts`, `src/routes/apps/cycle-settings.ts`, `src/routes/apps/shifts.ts`, `src/routes/apps/mine-plans.ts`, `src/routes/master-data.ts`; `geofencer: src/handlers/DataFetcherHandler.ts (DataFetcherHandler.datasetPulls)`.
+Code: `FMS-Backend: src/routes/apps/equipments.ts`, `src/routes/apps/locations.ts`, `src/routes/apps/geofences.ts`, `src/routes/apps/auto-event-schedules.ts`, `src/routes/apps/events.ts`, `src/routes/apps/users.ts`, `src/routes/apps/cycle-settings.ts`, `src/routes/apps/shifts.ts`, `src/routes/apps/mine-plans.ts`, `src/routes/master-data.ts`; `geofencer: src/handlers/DataFetcherHandler.ts (DataFetcherHandler.datasetPulls)`.
 
 > ⚠️ DEFECT: an operator already on the cab is updated with `permission_json` and `type` only (`geofencer: src/handlers/DataFetcherHandler.ts (DataFetcherHandler.findOrCreateOperator)`). A password, name or username changed on the Platform never reaches the cab: the cab's local check then refuses the new password and accepts the old one (see "Operator login"). Target: update every pulled column, `password` included.
+
+#### Automatic-event schedules — `GET /api/apps/auto-event-schedules` (FLEET ≥ 1.7.0)
+
+Automatic events by the clock, configured under the dashboard's Settings → Automatic Events and **fired by the cab** (handbook 02 §5 "Automatic events"). Auth as every `/api/apps` dataset (`x-api-key`). Handler: `FMS-Backend: src/helpers/auto-event-schedules.ts (AutoEventScheduleService.cabDataset)`.
+
+```jsonc
+{ "data": {
+    "timezone": "Asia/Makassar", "utc_offset_minutes": 480,
+    "schedules": [
+      { "id": 1, "name": "Meal break", "time": "12:00",
+        "event_id": 42, "event_code": "MB-S-0042", "event_description": "Meal/Coffee Break", "event_type": "STANDBY",
+        "days_of_week": [], "equipment_categories": [], "enabled": true, "updated_at": "2026-11-24T02:00:00.000Z" },
+      { "id": 2, "name": "Friday prayer", "time": "11:30", "event_id": 39, "event_code": "P-S-0039",
+        "event_description": "Prayers", "event_type": "STANDBY",
+        "days_of_week": [5], "equipment_categories": ["Truck"], "enabled": false, "updated_at": "…" }
+    ] },
+  "status": true }
+```
+
+| Field | Type | Notes |
+|---|---|---|
+| `timezone`, `utc_offset_minutes` | string, number | the site clock the `time`s are in — the Platform's process zone (handbook 02 §1) |
+| `schedules[].time` | `HH:mm` | site-local |
+| `schedules[].event_code` | string | what the cab starts; never a logout code, `PCU-D-0132` or a `BREAKDOWN*` type (the Platform refuses them with 422 and the cab refuses them again) |
+| `schedules[].days_of_week` | number[] | ISO weekdays, 1 = Monday … 7 = Sunday; `[]` = every day |
+| `schedules[].equipment_categories` | string[] | `mine_equipments.category` values; `[]` = every category. The cab compares its own category |
+| `schedules[].enabled` | boolean | disabled schedules are served, marked, so absence never means "turned off" |
+| `event_description`, `event_type` | string \| null | from master data now; null when the code has left it |
+
+**What the cab does** (geofencer ≥ 0.4.63, `AutoEventScheduleHandler`): every 15 s it looks for a schedule due — its minute has come, at most 2 minutes ago, on one of its days, for this unit's category, enabled. It claims each (schedule, local date) once (`auto-event:fired:{date}`, `HSETNX`), so a restart neither fires it twice nor catches up a minute the box was off for. Then it starts the event through its normal event chain — the running log closes, the event becomes `current:event`, and the log syncs to the tracker like an operator's — with `remarks: "Auto triggered by schedule: <name>"`, and pushes `auto-event:fired` to the in-cab UI (GRIDLOCK_CONTRACT §4). It skips the fire (recorded with the reason) when nobody is logged in, the unit is in a breakdown, at the prestart check or in a logout state, the event is already current, or the code is one it must never automate.
+
+#### Geofence automatic events — `properties.auto_event` on a `Geo Fence` (FLEET ≥ 1.7.0)
+
+A location of category `Geo Fence` drawn as a `Polygon` or `MultiPolygon` can carry, in its `properties`:
+
+```jsonc
+"auto_event": { "event_id": 10, "event_code": "RF-D-0010", "confirm_timeout_s": 30, "updated_by": "Planner", "updated_at": "…" }
+```
+
+It is written only by the dashboard's `PUT /api/v2/locations/:id/auto-event`; every other location write leaves it as stored (`FMS-Backend: src/helpers/locations.ts (LOCATION_MANAGED_KEYS)`). `confirm_timeout_s` is 5–120, 30 by default. The event obeys the same refusals as the schedules. Absent means no automatic event.
+
+**What the cab does** (geofencer ≥ 0.4.63, `GeofenceAutoEventHandler`): it evaluates every fix against the active `Geo Fence` polygons with an `auto_event` — a bounding-box prefilter, then point-in-polygon — with a 10 s dwell before "entered" and before "left". From geofencer 0.4.64 a fix within the site-wide `polygon_threshold` ("Geofence tuning", below) outside the polygon counts as inside it, to absorb GPS error; the dwell still applies on top. On entering, with an operator logged in, it opens **one prompt per visit** for the in-cab UI (`geofence:auto-event`, GRIDLOCK_CONTRACT §4). The UI asks the operator and **confirms by itself after `confirm_timeout_s`**; on a confirmation the UI posts the event with `remarks: "Auto triggered by geofence: <name>"`, and it reaches the tracker like any event log. "No" mutes that geofence until the unit leaves it. The prompt is withdrawn when the unit leaves, the operator logs out, a breakdown starts, the event changes or the fence is removed. No prompt in a breakdown, at the prestart check, when the event is already current, or for an event code the cab's auto-cycle owns while auto-cycle is on.
+
+Geofence automatic events are separate from the `geofence_logs` crossings of §5 ("Geofence crossings"), which still cover Loading Site and Dumping Site points only.
+
+#### Geofence loading/dumping polygons — `properties.site_type` on a `Geo Fence` (FLEET ≥ 1.8.0)
+
+A location of category `Geo Fence` drawn as a `Polygon` or `MultiPolygon` can carry, in its `properties`:
+
+```jsonc
+"site_type": "Dumping Site" // or "Loading Site"; absent or null: not a cycle site
+```
+
+It is a plain property, written with the location (v1 and v2 location writes; `null` removes it). The Platform refuses (422) a write that sends one for anything but a `Geo Fence` polygon, and drops one a write leaves behind when the location stops being one — recategorised, or redrawn as a point (`FMS-Backend: src/helpers/locations.ts (settleSiteType)`). Nothing else changes about the location: `geofence_logs` crossings (§5) still come from `Point` sites only, and an `auto_event` on the same polygon still prompts as above.
+
+**What the cab does** (geofencer ≥ 0.4.64, `AutoCycleHandler`): with auto-cycle on, the polygon is a loading or dumping site of the truck's cycle, exactly as a `Point` site with its designated radius. The distance it measures is the distance to the polygon — 0 anywhere inside — and the polygon's ring is the site-wide `polygon_threshold`:
+
+| Point site (today) | `site_type` polygon |
+|---|---|
+| arrives inside `departure_radius` / `dumping_departure_radius` on 2 consecutive fixes | arrives inside the polygon, or within `polygon_threshold` of it, on 2 consecutive fixes — no time dwell |
+| leaves past `max(1.25·r, r + 5)` | leaves past `max(1.25·t, t + 5)` from the polygon, `t` = `polygon_threshold` |
+| Hauling, with no travel direction: out past `loading_radius` | out past the same exit from a loading polygon |
+
+Loading and Dumping (a reverse ending in a 5 s stop), Hauling and Travelling (moving forward), the dump fallback (a reverse that stops within 90 m of a dump, here 90 m of the polygon's edge), the missed dump and "passing by is not arriving" apply unchanged. The cycle's `actual_loading_location_*` / `actual_dumping_location_*` name the polygon when the truck is inside it (within `polygon_threshold`), and the step's event log carries it as its `location_id` / `location_name`. A polygon whose `active` is `false` drives nothing.
+
+#### Excavator radii — `extra_props.departure_radius` / `loading_radius` on an `Excavator` (FLEET ≥ 1.9.0)
+
+An `Excavator`'s `mine_equipments.extra_props` can carry the same two radii as a loading location, in metres:
+
+```jsonc
+"extra_props": { "equipment_id": "300000123", "status": "Active", "departure_radius": 40, "loading_radius": 12 }
+```
+
+They are written only by the dashboard's `PUT /api/v2/equipment/:id/loading-radii` `{ departure_radius?, loading_radius? }` (a positive number, or `null` to remove it; 422 for any other category). A generic equipment write leaves them as stored and merges the rest of `extra_props` (`FMS-Backend: src/helpers/equipment-radii.ts`). After a change the Platform asks every unit to pull `equipment`. **Opt-in:** an excavator without a `departure_radius` drives nothing.
+
+**What the cab does** (geofencer ≥ 0.4.65, `AutoCycleHandler`): with auto-cycle on, every **online** excavator (§5 "The excavator beacon": connected and fresh) with a `departure_radius` is a **loading site that moves**, measured from its latest position on every evaluation, with exactly a Loading Site's rules:
+
+| Step | At an excavator |
+| --- | --- |
+| `arrived_at_load` | inside its `departure_radius` on 2 consecutive fixes, dated to the first |
+| `start_loading` | the reverse that ends in a 5 s stop inside that radius |
+| `hauling` | moving forward; with no travel direction, out past its `loading_radius` (`max(1.25 r, r + 5)`) |
+
+"Passing by is not arriving" and the missed dump apply unchanged. When several are in range, the truck's planned excavator (`exca_id` of its mine plan or session) wins. A step taken at an excavator names it in `auto-cycle:update` (`trigger.site` = its hull number, GRIDLOCK_CONTRACT §4) and as the cycle's `actual_exca_*`. An excavator that goes offline or stale stops counting at once, including for a Loading stop; the event log's location is still the nearest location, an excavator not being one.
 
 #### Geofence tuning — `GET /api/apps/geofences`
 
@@ -2061,7 +2157,8 @@ Resolved server-side (`FMS-Backend: src/controllers/GeofenceController.ts (Geofe
     "defaults": {
       "enter_radius": 20, "exit_radius": 40, "approach_radius": 60, "approach_exit_radius": 75,
       "arrival_dwell_ms": 20000, "min_transition_ms": 3000,
-      "nearest_location_radius": 90, "query_window_factor": 1.2
+      "nearest_location_radius": 90, "query_window_factor": 1.2,
+      "polygon_threshold": 10
     },
     "query_windows": { "Loading Site": 108, "Dumping Site": 90 },
     "locations": [
@@ -2086,7 +2183,8 @@ Resolved server-side (`FMS-Backend: src/controllers/GeofenceController.ts (Geofe
 
 | Field | Type | Presence | Notes |
 |---|---|---|---|
-| `data.defaults` | object | always | the six engine keys plus `nearest_location_radius` (the event-log nearest-location search) and `query_window_factor`; the site setting `app_settings.geofence_defaults` over the compiled fallback `GEOFENCE_DEFAULTS` |
+| `data.defaults` | object | always | the six engine keys plus `nearest_location_radius` (the event-log nearest-location search), `query_window_factor` and `polygon_threshold`; the site setting `app_settings.geofence_defaults` over the compiled fallback `GEOFENCE_DEFAULTS` |
+| `data.defaults.polygon_threshold` | number, metres, 0–90 | always (FLEET ≥ 1.8.0) | the GPS-error margin around every `Geo Fence` polygon the cab evaluates: a fix this far outside one counts as inside it, for `site_type` polygons and geofence automatic events alike. `0` is the polygon exactly. Default 10. Absent from an older Platform: the cab uses its own `GEOFENCE_POLYGON_THRESHOLD_M` (default 10) |
 | `data.query_windows` | object, category → metres | always | the cab's GEORADIUS candidate window per category: the widest `approach_exit_radius` in the category times `query_window_factor`, never below the site default's own window. Authoritative: the cab must not recompute it |
 | `data.locations[]` | array | always | Point geometries in `Loading Site` and `Dumping Site` only, whose `active` is not `false` |
 | `data.locations[].id`, `.code`, `.name`, `.category` | number, string, string, string | always | from `mine_locations`; the cab keys tuning by `code` |
@@ -2213,9 +2311,16 @@ Any other key is 422. `?check=true` answers the user only; geofencer handles its
 2. The shift: `resolveOperatorShift` (`FMS-Backend: src/modules/getShift.ts`) — the running shift, or the next one during its last 20 minutes (`OPERATOR_HANDOVER_MINUTES`, the crew handover), evaluated at `current_time` when the body has one.
 3. The user: 404 `Invalid ID: <username>` when there is no `Operator` of that name, 401 `Invalid password`.
 4. The plan: the unit's `mine_plans` row for that shift (`Truck` → `truck_id`, anything else → `exca_id`); 404 naming the hull and the shift when there is none.
-5. The session: the open session `current-session:{equipment_id}` names is reused only when it is on that plan (`isSessionOnPlan`); otherwise it is closed with `done_reason: "Shift Change"` (publishing `session:update`, §7) and a new one is created at the prestart event `PCU-D-0132`, with the plan's excavator, loading point, materials, blocks and foreman. A new session is written to `current-session:{equipment_id}` with a 13 h TTL.
+5. The session: the open session `current-session:{equipment_id}` names is reused only when it is **this operator's** and on that plan (`isSessionOnPlan`).
+   - **Another operator's** open session — one somebody forgot to log out of on this unit — is handed over: closed in the database only, with the time and reason of that operator's synced logout log if there is one (else now and `"Change Operator"`), `updated_by: "Login: change of operator"`, and no log, Redis write or cab command (`FMS-Backend: src/helpers/session-replace.ts (SessionReplaceService.handOver)`). It used to be returned as the new operator's session.
+   - This operator's session on another plan is closed with `done_reason: "Shift Change"` (publishing `session:update`, §7).
+   - Otherwise a new one is created at the prestart event `PCU-D-0132`, with the plan's excavator, loading point, materials, blocks and foreman, and written to `current-session:{equipment_id}` with a 13 h TTL.
 6. The token: `OperatorAuthUtils.signJWT`, HS256 over `{ id, username }` (`id` a number), 14 h, signed with `SECRET_KEY` (§7).
 7. An excavator's session id is copied to the sessions of the trucks on its plan (`exca_session_id`).
+8. **One operator, one open session — newest login wins.** The operator's other open sessions are listed in `data.ended_sessions` (those on other units) and ended **after** the answer is sent, never inside geofencer's 2 s budget:
+   - a session that is still its unit's (`current-session:{equipment_id}` names it, or names nothing) is ended like a dispatcher's End session on `WO-S-0156` Wait Operator, with the remark `Operator <name> logged in on <hull>`: its open logs close, a Wait Operator log opens, the unit's live state is cleared, the session is marked `"Dispatch: end session"` and its cab is sent `session:end` with `cause: "login-elsewhere"` (§5 "Session commands"). An offline cab logs out on its next sync;
+   - a session whose unit has moved on to another session is closed quietly: the row only, with the same marker.
+   - Offline logins reach the Platform only through the tracker's session sync, so a worker sweep (`FMS-Backend: src/helpers/session-converge.ts`) applies the same rule once a minute to every operator with more than one open session, keeping the newest by `created_at` (the unit's own login time, §5).
 
 > ⚠️ DEFECT: step 2 uses the cab's `current_time` whenever it is present, which geofencer always sends — the cab's clock decides the shift. The controller's own comment and `FMS-Backend: tests/operator-login-shift.test.ts` ("the server clock decides, not the cab's current_time") say the Platform's clock decides. Target: resolve on the server clock and keep `current_time` informational.
 
@@ -2228,7 +2333,8 @@ Any other key is 422. `?check=true` answers the user only; geofencer handles its
     "token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.…",
     "session": { "id": 5521, "equipment_id": 7, "operator_id": 3, "mine_plan_id": 100, "event_code": "PCU-D-0132", "shift": "NIGHT", "…": "…" },
     "currentMinePlan": { "id": 100, "shift": "NIGHT", "shift_start": "…", "shift_end": "…", "…": "…" },
-    "current_shift": { "start": "…", "end": "…", "label": "NIGHT" }
+    "current_shift": { "start": "…", "end": "…", "label": "NIGHT" },
+    "ended_sessions": [{ "session_id": 5490, "equipment_id": 21, "hull_number": "DT-1021", "started_at": "2026-01-15T23:12:40.000Z" }]
   },
   "elapsedTime": 41.7,
   "status": true
@@ -2242,10 +2348,11 @@ Any other key is 422. `?check=true` answers the user only; geofencer handles its
 | `data.session` | object | always | the `sessions` row reused or created |
 | `data.currentMinePlan` | object | always | the `mine_plans` row of the resolved shift |
 | `data.current_shift` | object | always | `{ start, end, label }` of the resolved shift |
+| `data.ended_sessions` | array | always (FLEET ≥ 1.7.0; `[]` when none) | the operator's open sessions on **other** units that step 8 is about to end: `{ session_id, equipment_id, hull_number, started_at }`, newest first. The in-cab UI tells the operator (GRIDLOCK_CONTRACT §3 "Operator login") |
 
 > ⚠️ DEFECT: the answer carries the operator's password hash, and geofencer passes the whole body on to the in-cab UI. Target: blank `password`, as the deprecated `/old` route did.
 
-- **geofencer on success:** RedisJSON `current:session` = `{ token, last_updated, …session }` (no TTL), `current:operator` and `current:token` (4 h each); a local `LoginHistory` row with `synced_id` = the session id; the prestart event opened locally; the current operator pushed to the tracker (§5); the Platform's body returned to the UI. `currentMinePlan` is not stored — the cab keeps its pulled `current:plan`.
+- **geofencer on success:** RedisJSON `current:session` = `{ token, last_updated, …session }` (no TTL), `current:operator` and `current:token` (4 h each); a local `LoginHistory` row with `synced_id` = the session id; the prestart event opened locally; the current operator pushed to the tracker (§5); the Platform's body returned to the UI unchanged, `ended_sessions` included. An offline login has no `ended_sessions`. `currentMinePlan` is not stored — the cab keeps its pulled `current:plan`.
 - **Offline login:** when the probe fails, or the request fails for any reason (timeout, 4xx, 5xx), geofencer logs the operator in locally: a session built from `current:plan` (or the last `LoginHistory`), a JWT it signs itself, HS256 over `{ exp: 13 h, id: svr_id, username }` with its own `JWT_SECRET`, stored at the same `current:token`. The session reaches the Platform later through the tracker (§5).
 - **Logout** does not use this surface: geofencer never calls `PATCH /api/operators/auth/:id`. The end of a session reaches the Platform as event logs and session updates through the tracker (§5).
 
@@ -2581,6 +2688,59 @@ Each section ends with the rules particular to its surface; these hold for all o
 ## 10. Changelog
 
 Newest first. Every change to this file adds an entry here and bumps the marker under the title (§0).
+
+### 1.9.0 — 2026-11-25
+
+**Added: an excavator's own radii drive the hauler's auto-cycle, for online excavators.** All additive; no field changes meaning.
+
+- §6 "Excavator radii": `extra_props.departure_radius` / `loading_radius` on an `Excavator`, written only by `PUT /api/v2/equipment/:id/loading-radii`; the cab stores them and treats an online excavator with a `departure_radius` as a moving loading site.
+- §6 `equipment` row: the cab stores the two radii on create and update.
+- §5 "The excavator beacon": positions now feed the auto-cycle too; **online** = `equipment:{uuid}.socket_id` present and a fresh position; the cab reads `socket_id` (seeding table, compatibility rule 8).
+
+Affects:
+- **the Platform:** the endpoint, `extra_props` merged on the v1 equipment writes, an `equipment` push; no migration (existing JSONB);
+- **geofencer 0.4.65:** the radii columns, the online check, excavator sites in the auto-cycle;
+- **microservice.tracker:** none — `socket_id` is already set and removed by the socket lifecycle, and the cabs' restricted user already has `HGET`;
+- **microservice.hm, microservice.gps:** mirror only.
+
+Release order: the Platform, then geofencer, then the dashboard. An older cab ignores the radii.
+
+### 1.8.0 — 2026-11-25
+
+**Added: Geo Fence polygons as loading and dumping sites, and a GPS-error margin around polygons.** All additive; no field changes meaning.
+
+- §6 "Geofence loading/dumping polygons": `properties.site_type` (`Loading Site` | `Dumping Site`) on a `Geo Fence` polygon makes it a site of the cab's auto-cycle, arrived at on the polygon itself. The Platform accepts it only on a `Geo Fence` polygon (422 otherwise) and drops it when a location stops being one.
+- §6 "Geofence tuning": `data.defaults.polygon_threshold`, metres, 0–90, default 10 — the margin outside a polygon that still counts as inside. Optional on `PUT /api/v2/geofence-settings`; omitted, the stored value is kept.
+- §6 "Geofence automatic events": entry and exit are judged with `polygon_threshold` from geofencer 0.4.64.
+- §5: the event-log location note and the `geofence_logs` `location_type` row name the polygon exception.
+
+Affects:
+- **the Platform:** `src/helpers/geofence.ts`, `src/helpers/locations.ts`, the location and geofence-settings writes; no migration (both live in existing JSONB);
+- **geofencer 0.4.64:** polygon sites in the auto-cycle, `polygon_threshold` for the polygons and the geofence automatic events;
+- **microservice.tracker, microservice.hm, microservice.gps:** mirror only.
+
+Release order: the Platform, then geofencer, then the dashboard. An older cab ignores `site_type` and `polygon_threshold`; an older dashboard keeps saving the geofence settings (the key is optional).
+
+### 1.7.0 — 2026-11-24
+
+**Added: one open session per operator, and automatic events.** All additive; no field changes meaning.
+
+- **One open session per operator — newest login wins.**
+  - §6 "Operator login": the login's answer gains `data.ended_sessions`, the operator's open sessions on other units (always an array). The Platform ends them after answering: in full, on `WO-S-0156`, when the session still runs its unit; quietly when its unit has moved on.
+  - §6 step 5: another operator's open session on the unit logging in is handed over, not returned. A worker sweep converges offline logins once a minute.
+  - §5 "Session commands": `session:end` gains the optional `event_log_uuid`, `cause` (`dispatch` | `login-elsewhere`) and `remarks`. A geofencer ≥ 0.4.63 uses `event_log_uuid` as the id of its own log, so the tracker's uuid lookup drops the duplicate, and records a fresh device hour meter as the login's end. The `"Dispatch: end session"` marker now also means "logged in on another unit".
+- **Automatic events by the clock.**
+  - §6: a new master dataset, `auto-event-schedules` (`GET /api/apps/auto-event-schedules`), with what the cab does.
+  - §5 "Master-data pull": the new name, and the rule that the Platform sends it **alone** after a schedule changes.
+- **Geofence automatic events.** §6: `properties.auto_event` on a `Geo Fence` polygon (written only by the Platform's own endpoint), `active` stored on the cab's locations, and how the cab evaluates the polygons and opens one prompt per visit.
+
+Affects:
+- **the Platform:** migrations `20261124090000-sessions-open-operator-index.js` and `20261124100000-auto-event-schedules.js`, the login, the sweep, the routes;
+- **geofencer 0.4.63:** the dataset, the scheduler, polygon evaluation, `event_log_uuid`;
+- **microservice.tracker:** none — no new command; `session:end` and `master-data:pull` are already allowlisted;
+- **microservice.hm, microservice.gps:** mirror only.
+
+Release order: the Platform, then geofencer. A push of `auto-event-schedules` to an older cab is refused (400) and logged; an older cab ignores the new `session:end` fields and `auto_event`.
 
 ### 1.6.1 — 2026-11-20
 
